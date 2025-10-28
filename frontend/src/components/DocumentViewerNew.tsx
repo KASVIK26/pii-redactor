@@ -1,70 +1,16 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, Suspense } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import InteractiveRedactionOverlay from './InteractiveRedactionOverlay'
-import PdfErrorBoundary from './PdfErrorBoundary'
 import { 
   ChevronLeft, 
   ChevronRight, 
   ZoomIn, 
-  ZoomOut, 
-  RotateCw,
+  ZoomOut,
   Maximize2,
   Minimize2
 } from 'lucide-react'
-import type { Document as ReactPdfDocument, Page as ReactPdfPage } from 'react-pdf'
-
-// We'll import react-pdf inside our component to control timing
-let Document: typeof ReactPdfDocument | null = null
-let Page: typeof ReactPdfPage | null = null
-let ReactPdfImportPromise: Promise<void> | null = null
-
-const importReactPdf = async () => {
-  if (ReactPdfImportPromise) return ReactPdfImportPromise
-  
-  ReactPdfImportPromise = (async () => {
-    try {
-      console.log('[DocumentViewer] Importing react-pdf...')
-      const ReactPdf = await import('react-pdf')
-      Document = ReactPdf.Document
-      Page = ReactPdf.Page
-      console.log('[DocumentViewer] react-pdf imported successfully')
-    } catch (error) {
-      console.error('[DocumentViewer] Failed to import react-pdf:', error)
-      throw error
-    }
-  })()
-  
-  return ReactPdfImportPromise
-}
-
-// Helper to setup PDF worker after module loads
-const setupPdfWorkerAsync = async () => {
-  try {
-    console.log('[DocumentViewer] Setting up PDF worker...')
-    
-    // Import react-pdf's pdfjs
-    const { pdfjs } = await import('react-pdf')
-    
-    // The worker URL should already be in the global scope from layout.tsx
-    // But we'll also set it here via pdfjs if available
-    if (pdfjs?.GlobalWorkerOptions) {
-      const workerUrl = (window as any).pdfjsWorkerSrc || 
-        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.296/pdf.worker.min.js'
-      
-      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
-      console.log('[DocumentViewer] PDF worker configured successfully:', workerUrl)
-      return true
-    } else {
-      console.warn('[DocumentViewer] pdfjs.GlobalWorkerOptions not available')
-      return false
-    }
-  } catch (error) {
-    console.error('[DocumentViewer] Failed to setup PDF worker:', error)
-    return false
-  }
-}
 
 interface DocumentViewerProps {
   documentUrl: string
@@ -116,85 +62,171 @@ export default function DocumentViewer({
   const [error, setError] = useState<string | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [containerDimensions, setContainerDimensions] = useState({ width: 800, height: 600 })
-  const [pdfModulesLoaded, setPdfModulesLoaded] = useState(false)
+  const [pageCanvases, setPageCanvases] = useState<{ [key: number]: HTMLCanvasElement | null }>({})
   const containerRef = useRef<HTMLDivElement>(null)
-  const pageRefs = useRef<{ [key: number]: HTMLDivElement | null }>({})
+  const pdfDocRef = useRef<any>(null)
 
-  // Initialize PDF worker on first component mount
+  // Initialize PDF worker when component mounts
   useEffect(() => {
-    console.log('[DocumentViewer] Component mounted, setting up PDF...')
-    
-    // First import react-pdf, then set up worker
-    importReactPdf()
-      .then(() => {
-        setPdfModulesLoaded(true)
-        return setupPdfWorkerAsync()
-      })
-      .then(success => {
-        if (success) {
-          console.log('[DocumentViewer] PDF setup completed successfully')
-        } else {
-          console.warn('[DocumentViewer] PDF setup may be incomplete')
+    const initPdf = async () => {
+      try {
+        console.log('[DocumentViewer] Waiting for PDF.js library...')
+        
+        // If already loaded, use it immediately
+        if (typeof (window as any).pdfjsLib !== 'undefined' && (window as any).pdfjsLib.getDocument) {
+          console.log('[DocumentViewer] PDF.js library available globally')
+          return true
         }
-      })
-      .catch(error => {
-        console.error('[DocumentViewer] Error during PDF setup:', error)
-      })
-  }, [])
 
-  const onDocumentLoadSuccess = useCallback(({ numPages }: { numPages: number }) => {
-    console.log('[DocumentViewer] Document loaded successfully, pages:', numPages)
-    setNumPages(numPages)
-    setLoading(false)
-    setError(null)
-  }, [])
+        // Otherwise, wait for the pdfReady event
+        return new Promise<boolean>((resolve) => {
+          const timeout = setTimeout(() => {
+            console.error('[DocumentViewer] Timeout waiting for PDF.js')
+            resolve(false)
+          }, 10000) // Increased to 10 seconds
 
-  const onDocumentLoadError = useCallback((error: Error) => {
-    console.error('[DocumentViewer] PDF Load Error:', error)
-    console.error('[DocumentViewer] Error message:', error.message)
-    console.error('[DocumentViewer] Error stack:', error.stack)
-    
-    // Check if it's a worker-related error and try to reinitialize
-    if (error.message.includes('Worker') || error.message.includes('GlobalWorkerOptions') || error.message.includes('defineProperty')) {
-      console.warn('[DocumentViewer] Detected worker-related error, attempting fallback...')
-      // Retry with alternative CDN
-      setupPdfWorkerAsync()
-        .then(success => {
-          if (success) {
-            console.log('[DocumentViewer] Fallback setup completed, retrying document load...')
-            // Retry loading after a short delay
-            setTimeout(() => {
-              setError(null)
-              setLoading(true)
-              // Force re-render by updating state
-              setCurrentPage(prev => prev)
-            }, 1000)
+          const handlePdfReady = () => {
+            clearTimeout(timeout)
+            window.removeEventListener('pdfReady', handlePdfReady)
+            console.log('[DocumentViewer] PDF.js ready event received')
+            resolve(true)
           }
+
+          window.addEventListener('pdfReady', handlePdfReady)
         })
-        .catch(err => console.error('[DocumentViewer] Fallback setup error:', err))
+      } catch (err) {
+        console.error('[DocumentViewer] Failed to initialize PDF.js:', err)
+        setError('Failed to initialize PDF viewer')
+        return false
+      }
+    }
+
+    initPdf()
+  }, [])
+
+  // Load PDF document
+  useEffect(() => {
+    if (!documentUrl || fileType !== 'pdf') {
+      setLoading(false)
       return
     }
-    
-    setError(`Failed to load document: ${error.message}`)
-    setLoading(false)
-  }, [])
+
+    const loadPdf = async () => {
+      try {
+        console.log('[DocumentViewer] Loading PDF from:', documentUrl)
+        setLoading(true)
+        setError(null)
+
+        // Wait for PDF.js to be available - with longer timeout
+        let attempts = 0
+        const maxAttempts = 100 // 10 seconds with 100ms intervals
+        while ((typeof (window as any).pdfjsLib === 'undefined' || !(window as any).pdfjsLib.getDocument) && attempts < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+          attempts++
+        }
+
+        // Get the globally loaded PDF.js library
+        const pdf = (window as any).pdfjsLib
+        if (!pdf || !pdf.getDocument) {
+          throw new Error('PDF.js library not available - initialization failed after waiting')
+        }
+
+        // Load the PDF
+        console.log('[DocumentViewer] Starting PDF fetch...')
+        const doc = await pdf.getDocument({ url: documentUrl }).promise
+        
+        console.log('[DocumentViewer] PDF loaded successfully, pages:', doc.numPages)
+        pdfDocRef.current = doc
+        setNumPages(doc.numPages)
+        
+        // Render first page
+        await renderPage(doc, 1)
+        setLoading(false)
+      } catch (err) {
+        console.error('[DocumentViewer] Error loading PDF:', err)
+        setError(`Failed to load PDF: ${err instanceof Error ? err.message : String(err)}`)
+        setLoading(false)
+      }
+    }
+
+    loadPdf()
+  }, [documentUrl, fileType])
+
+  // Render a specific page
+  const renderPage = async (doc: any, pageNum: number) => {
+    try {
+      console.log('[DocumentViewer] Rendering page:', pageNum)
+      
+      const page = await doc.getPage(pageNum)
+      const canvas = document.createElement('canvas')
+      const context = canvas.getContext('2d')
+      
+      if (!context) {
+        throw new Error('Could not get canvas context')
+      }
+
+      // Calculate scale
+      const scale = (zoom / 100) * 1.5
+      const viewport = page.getViewport({ scale })
+      
+      canvas.height = viewport.height
+      canvas.width = viewport.width
+      
+      // Render page to canvas
+      await page.render({
+        canvasContext: context,
+        viewport: viewport
+      }).promise
+
+      console.log('[DocumentViewer] Page rendered, dimensions:', viewport.width, 'x', viewport.height)
+      
+      setPageCanvases(prev => ({ ...prev, [pageNum]: canvas }))
+      setContainerDimensions({ width: viewport.width, height: viewport.height })
+    } catch (err) {
+      console.error('[DocumentViewer] Error rendering page:', err)
+      throw err
+    }
+  }
+
+  // Handle page changes
+  const handlePreviousPage = () => {
+    const newPage = Math.max(1, currentPage - 1)
+    setCurrentPage(newPage)
+    if (pdfDocRef.current) {
+      renderPage(pdfDocRef.current, newPage).catch(err => 
+        console.error('[DocumentViewer] Error rendering previous page:', err)
+      )
+    }
+  }
+
+  const handleNextPage = () => {
+    const newPage = Math.min(numPages, currentPage + 1)
+    setCurrentPage(newPage)
+    if (pdfDocRef.current) {
+      renderPage(pdfDocRef.current, newPage).catch(err => 
+        console.error('[DocumentViewer] Error rendering next page:', err)
+      )
+    }
+  }
 
   const handleZoomIn = () => {
     const newZoom = Math.min(200, zoom + 25)
     onZoomChange?.(newZoom)
+    if (pdfDocRef.current) {
+      renderPage(pdfDocRef.current, currentPage).catch(err => 
+        console.error('[DocumentViewer] Error re-rendering on zoom:', err)
+      )
+    }
   }
 
   const handleZoomOut = () => {
     const newZoom = Math.max(25, zoom - 25)
     onZoomChange?.(newZoom)
-  }
-
-  const handlePreviousPage = () => {
-    setCurrentPage(Math.max(1, currentPage - 1))
-  }
-
-  const handleNextPage = () => {
-    setCurrentPage(Math.min(numPages, currentPage + 1))
+    if (pdfDocRef.current) {
+      renderPage(pdfDocRef.current, currentPage).catch(err => 
+        console.error('[DocumentViewer] Error re-rendering on zoom:', err)
+      )
+    }
   }
 
   const toggleFullscreen = () => {
@@ -343,6 +375,8 @@ export default function DocumentViewer({
   }
 
   // Handle PDF files
+  const pageCanvas = pageCanvases[currentPage]
+
   return (
     <div 
       ref={containerRef}
@@ -390,88 +424,50 @@ export default function DocumentViewer({
           <div className="flex items-center justify-center p-8 bg-gray-50 rounded">
             <p className="text-gray-600">No document URL provided</p>
           </div>
-        ) : (
-          <>
-            {console.log('[DocumentViewer] Rendering with documentUrl:', documentUrl)}
-            <PdfErrorBoundary
-              onRetry={() => {
-                console.log('[DocumentViewer] Retry button clicked')
-                setError(null)
-                setLoading(true)
-                setupPdfWorkerAsync()
-                  .then(success => {
-                    if (!success) {
-                      console.warn('[DocumentViewer] Retry setup did not succeed')
+        ) : pageCanvas ? (
+          <div className="relative inline-block">
+            <canvas
+              ref={el => {
+                if (el && pageCanvas) {
+                  el.width = pageCanvas.width
+                  el.height = pageCanvas.height
+                  const ctx = el.getContext('2d')
+                  if (ctx) {
+                    const pageCtx = pageCanvas.getContext('2d')
+                    if (pageCtx) {
+                      ctx.drawImage(pageCanvas, 0, 0)
                     }
-                  })
-                  .catch(err => console.error('[DocumentViewer] Retry error:', err))
+                  }
+                }
               }}
-            >
-              {!pdfModulesLoaded ? (
-                <div className="flex items-center justify-center p-8">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-                </div>
-              ) : Document ? (
-                <Suspense fallback={
-                  <div className="flex items-center justify-center p-8">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-                  </div>
-                }>
-                  <Document
-                    file={documentUrl}
-                    onLoadSuccess={onDocumentLoadSuccess}
-                    onLoadError={onDocumentLoadError}
-                    loading={
-                      <div className="flex items-center justify-center p-8">
-                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-                      </div>
-                    }
-                  >
-                    <div className="relative inline-block">
-                      {Page && (
-                        <Suspense fallback={
-                          <div className="flex items-center justify-center p-8 bg-gray-100" style={{ width: '800px', height: '600px' }}>
-                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-                          </div>
-                        }>
-                          <Page
-                            pageNumber={currentPage}
-                            scale={zoom / 100}
-                            renderTextLayer={!showRedacted}
-                            renderAnnotationLayer={false}
-                            onRenderSuccess={(page: any) => {
-                              // Update container dimensions based on PDF page
-                              setContainerDimensions({ 
-                                width: page.width, 
-                                height: page.height 
-                              })
-                            }}
-                          />
-                        </Suspense>
-                      )}
-                      <InteractiveRedactionOverlay
-                        boxes={redactionBoxes}
-                        zoom={zoom}
-                        isEditing={isEditing}
-                        selectedTool={selectedTool}
-                        showRedacted={showRedacted}
-                        onBoxUpdate={handleBoxUpdate}
-                        onBoxDelete={handleBoxDelete}
-                        onBoxSelect={handleBoxSelect}
-                        onAddBox={handleAddBox}
-                        containerWidth={containerDimensions.width}
-                        containerHeight={containerDimensions.height}
-                      />
-                    </div>
-                  </Document>
-                </Suspense>
-              ) : (
-                <div className="flex items-center justify-center p-8 text-red-600">
-                  Failed to load PDF modules
-                </div>
-              )}
-            </PdfErrorBoundary>
-          </>
+              style={{ display: 'none' }}
+            />
+            <img
+              src={pageCanvas.toDataURL()}
+              alt={`Page ${currentPage}`}
+              className="max-w-none"
+              style={{
+                maxHeight: '100vh',
+              }}
+            />
+            <InteractiveRedactionOverlay
+              boxes={redactionBoxes}
+              zoom={zoom}
+              isEditing={isEditing}
+              selectedTool={selectedTool}
+              showRedacted={showRedacted}
+              onBoxUpdate={handleBoxUpdate}
+              onBoxDelete={handleBoxDelete}
+              onBoxSelect={handleBoxSelect}
+              onAddBox={handleAddBox}
+              containerWidth={containerDimensions.width}
+              containerHeight={containerDimensions.height}
+            />
+          </div>
+        ) : (
+          <div className="flex items-center justify-center p-8">
+            <p className="text-gray-600">Rendering page...</p>
+          </div>
         )}
       </div>
 
@@ -482,11 +478,18 @@ export default function DocumentViewer({
             {Array.from({ length: numPages }, (_, index) => index + 1).map(pageNum => (
               <button
                 key={pageNum}
-                onClick={() => setCurrentPage(pageNum)}
-                className={`flex-shrink-0 w-12 h-16 border-2 rounded text-xs flex items-center justify-center transition-colors ${
-                  currentPage === pageNum 
-                    ? 'border-blue-500 bg-blue-50 text-blue-700' 
-                    : 'border-gray-300 hover:border-gray-400 bg-white'
+                onClick={() => {
+                  setCurrentPage(pageNum)
+                  if (pdfDocRef.current) {
+                    renderPage(pdfDocRef.current, pageNum).catch(err => 
+                      console.error('[DocumentViewer] Error rendering thumbnail page:', err)
+                    )
+                  }
+                }}
+                className={`px-2 py-1 text-xs font-medium rounded ${
+                  currentPage === pageNum
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                 }`}
               >
                 {pageNum}

@@ -1,11 +1,9 @@
 'use client'
 
-import React, { useState, useCallback } from 'react'
-import Draggable from 'react-draggable'
-import { ResizableBox } from 'react-resizable'
+import React, { useState, useCallback, useRef } from 'react'
+import { motion } from 'framer-motion'
 import { Trash2, Move, Square, Eye, EyeOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import 'react-resizable/css/styles.css'
 
 interface RedactionBox {
   id: string
@@ -49,7 +47,7 @@ export default function InteractiveRedactionOverlay({
   containerHeight = 600
 }: InteractiveRedactionOverlayProps) {
   const [selectedBoxId, setSelectedBoxId] = useState<string | null>(null)
-  const [dragData, setDragData] = useState<{ [key: string]: { x: number; y: number } }>({})
+  const [resizeData, setResizeData] = useState<{ [key: string]: { width: number; height: number } }>({})
 
   const handleBoxClick = useCallback((boxId: string, event: React.MouseEvent) => {
     event.stopPropagation()
@@ -60,31 +58,23 @@ export default function InteractiveRedactionOverlay({
   }, [selectedTool, onBoxSelect])
 
   const handleDragStart = useCallback((boxId: string, data: any) => {
-    setDragData(prev => ({
-      ...prev,
-      [boxId]: { x: data.x, y: data.y }
-    }))
+    // No-op for framer-motion
   }, [])
 
-  const handleDragStop = useCallback((boxId: string, data: any) => {
+  const handleDragStop = useCallback((boxId: string, info: any) => {
     const box = boxes.find(b => b.id === boxId)
     if (box) {
       onBoxUpdate(boxId, {
-        x: Math.max(0, Math.min(data.x, containerWidth - box.width)),
-        y: Math.max(0, Math.min(data.y, containerHeight - box.height))
+        x: Math.max(0, Math.min(info.x, containerWidth - box.width)),
+        y: Math.max(0, Math.min(info.y, containerHeight - box.height))
       })
     }
-    setDragData(prev => {
-      const newData = { ...prev }
-      delete newData[boxId]
-      return newData
-    })
   }, [boxes, onBoxUpdate, containerWidth, containerHeight])
 
-  const handleResize = useCallback((boxId: string, _event: React.SyntheticEvent, { size }: { size: { width: number; height: number } }) => {
+  const handleResize = useCallback((boxId: string, newWidth: number, newHeight: number) => {
     onBoxUpdate(boxId, {
-      width: Math.max(20, size.width),
-      height: Math.max(20, size.height)
+      width: Math.max(20, newWidth),
+      height: Math.max(20, newHeight)
     })
   }, [onBoxUpdate])
 
@@ -145,19 +135,23 @@ export default function InteractiveRedactionOverlay({
     let className = 'absolute transition-all duration-200 '
     
     if (shouldShowRedacted) {
+      // Professional solid black redaction
       className += 'bg-black border-2 border-black'
     } else {
+      // Selected state or pending redaction
       className += `border-2 ${
         box.user_approved === true 
-          ? 'border-green-500 bg-green-100 bg-opacity-50'
+          ? 'border-green-500 bg-green-500 bg-opacity-30'
           : box.user_approved === false
-            ? 'border-red-500 bg-red-100 bg-opacity-50'
-            : 'border-blue-500 bg-blue-100 bg-opacity-50'
+            ? 'border-red-500 bg-red-500 bg-opacity-30'
+            : isSelected
+              ? 'border-blue-600 bg-blue-600 bg-opacity-40'
+              : 'border-amber-500 bg-amber-500 bg-opacity-20'
       }`
     }
     
     if (isSelected && isEditing) {
-      className += ' ring-4 ring-blue-300 ring-opacity-50'
+      className += ' ring-2 ring-yellow-400 ring-opacity-75 shadow-lg'
     }
     
     if (isEditing) {
@@ -166,14 +160,14 @@ export default function InteractiveRedactionOverlay({
           className += ' cursor-crosshair'
           break
         case 'move':
-          className += ' cursor-move'
+          className += ' cursor-grab active:cursor-grabbing'
           break
         case 'erase':
-          className += ' cursor-crosshair'
+          className += ' cursor-not-allowed'
           break
         case 'select':
         default:
-          className += ' cursor-pointer'
+          className += ' cursor-pointer hover:opacity-80'
           break
       }
     } else {
@@ -183,7 +177,7 @@ export default function InteractiveRedactionOverlay({
     return {
       className,
       style: {
-        transform: `scale(${zoom / 100})`,
+        transform: `scale(1)`,
         transformOrigin: 'top left',
       }
     }
@@ -199,7 +193,6 @@ export default function InteractiveRedactionOverlay({
         const { className, style } = getBoxStyle(box)
         const isSelected = selectedBoxId === box.id
         const shouldShowRedacted = showRedacted && box.isRedacted && box.user_approved
-        const isDragging = dragData[box.id]
 
         if (!isEditing) {
           // Static overlay mode - just show the boxes
@@ -227,85 +220,106 @@ export default function InteractiveRedactionOverlay({
         }
 
         return (
-          <Draggable
+          <motion.div
             key={box.id}
-            position={{ x: box.x, y: box.y }}
-            onStart={(e, data) => handleDragStart(box.id, data)}
-            onStop={(e, data) => handleDragStop(box.id, data)}
-            disabled={selectedTool !== 'move' && selectedTool !== 'select' && selectedTool !== 'erase'}
-            bounds="parent"
+            drag={selectedTool === 'move' || selectedTool === 'select'}
+            dragMomentum={false}
+            initial={{ x: box.x, y: box.y }}
+            animate={{ x: box.x, y: box.y }}
+            onDragEnd={(event, info) => handleDragStop(box.id, info)}
+            className="absolute"
+            style={{
+              width: box.width,
+              height: box.height,
+              left: 0,
+              top: 0,
+            }}
           >
-            <div>
-              <ResizableBox
-                width={box.width}
-                height={box.height}
-                onResize={(e, data) => handleResize(box.id, e, data)}
-                resizeHandles={isSelected ? ['se', 'sw', 'ne', 'nw', 'n', 's', 'e', 'w'] : []}
-                minConstraints={[20, 20]}
-                maxConstraints={[containerWidth, containerHeight]}
-              >
-                <div
-                  className={className}
-                  style={{
-                    ...style,
-                    width: '100%',
-                    height: '100%',
-                  }}
-                  onClick={(e) => handleBoxClick(box.id, e)}
-                >
-                  {/* Content overlay */}
-                  {shouldShowRedacted ? (
-                    <div className="w-full h-full bg-black flex items-center justify-center text-white text-xs font-mono">
-                      [REDACTED]
-                    </div>
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center">
-                      <span className="text-xs font-medium text-gray-700 bg-white bg-opacity-75 px-1 rounded">
-                        {box.text?.substring(0, 10) || 'Redaction'}
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Control buttons for selected box */}
-                  {isSelected && (
-                    <div className="absolute -top-8 left-0 flex space-x-1 bg-white rounded shadow-lg p-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 w-6 p-0"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          toggleBoxRedaction(box.id)
-                        }}
-                        title={box.isRedacted ? 'Show original' : 'Apply redaction'}
-                      >
-                        {box.isRedacted ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 w-6 p-0 text-red-600"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onBoxDelete(box.id)
-                        }}
-                        title="Delete redaction"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </Button>
-                    </div>
-                  )}
-
-                  {/* Drag indicator */}
-                  {isDragging && (
-                    <div className="absolute top-1 right-1">
-                      <Move className="h-3 w-3 text-gray-500" />
-                    </div>
-                  )}
+            <div
+              className={className}
+              style={{
+                ...style,
+                width: '100%',
+                height: '100%',
+              }}
+              onClick={(e) => handleBoxClick(box.id, e)}
+            >
+              {/* Content overlay */}
+              {shouldShowRedacted ? (
+                <div className="w-full h-full bg-black flex items-center justify-center text-white text-xs font-mono">
+                  [REDACTED]
                 </div>
-              </ResizableBox>
+              ) : (
+                <div className="w-full h-full flex items-center justify-center">
+                  <span className="text-xs font-medium text-gray-700 bg-white bg-opacity-75 px-1 rounded">
+                    {box.text?.substring(0, 10) || 'Redaction'}
+                  </span>
+                </div>
+              )}
+
+              {/* Control buttons for selected box */}
+              {isSelected && (
+                <div className="absolute -top-8 left-0 flex space-x-1 bg-white rounded shadow-lg p-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 w-6 p-0"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      toggleBoxRedaction(box.id)
+                    }}
+                    title={box.isRedacted ? 'Show original' : 'Apply redaction'}
+                  >
+                    {box.isRedacted ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 w-6 p-0 text-red-600"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onBoxDelete(box.id)
+                    }}
+                    title="Delete redaction"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </Button>
+                </div>
+              )}
+
+              {/* Resize handles */}
+              {isSelected && (
+                <>
+                  <div 
+                    className="absolute bottom-0 right-0 w-3 h-3 bg-blue-500 cursor-se-resize"
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const startX = e.clientX
+                      const startY = e.clientY
+                      const startWidth = box.width
+                      const startHeight = box.height
+
+                      const handleMouseMove = (moveEvent: MouseEvent) => {
+                        const deltaX = moveEvent.clientX - startX
+                        const deltaY = moveEvent.clientY - startY
+                        handleResize(box.id, startWidth + deltaX, startHeight + deltaY)
+                      }
+
+                      const handleMouseUp = () => {
+                        document.removeEventListener('mousemove', handleMouseMove)
+                        document.removeEventListener('mouseup', handleMouseUp)
+                      }
+
+                      document.addEventListener('mousemove', handleMouseMove)
+                      document.addEventListener('mouseup', handleMouseUp)
+                    }}
+                    title="Drag to resize"
+                  />
+                </>
+              )}
             </div>
-          </Draggable>
+          </motion.div>
         )
       })}
 

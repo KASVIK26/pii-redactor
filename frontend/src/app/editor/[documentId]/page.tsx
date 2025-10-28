@@ -29,7 +29,7 @@ import {
   Eraser
 } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
-import DocumentViewer from '@/components/DocumentViewer'
+import DocumentViewer from '@/components/DocumentViewerProfessional'
 
 interface Entity {
   id?: string
@@ -66,7 +66,7 @@ interface Document {
 export default function LiveEditor() {
   const params = useParams()
   const router = useRouter()
-  const { user } = useAuth()
+  const { user, session } = useAuth()
   const documentId = params?.documentId as string
   
   const [document, setDocument] = useState<Document | null>(null)
@@ -77,29 +77,51 @@ export default function LiveEditor() {
   const [selectedTool, setSelectedTool] = useState<'select' | 'redact' | 'move' | 'erase'>('select')
   const [selectedEntities, setSelectedEntities] = useState<string[]>([])
 
+  // Handle unauthenticated users - moved to separate useEffect to avoid setState during render
   useEffect(() => {
-    if (documentId && user) {
-      fetchDocument()
+    if (!user && !loading) {
+      console.log('[LiveEditor] No user found, redirecting to login')
+      router.push('/')
     }
-  }, [documentId, user])
+  }, [user, router])
+
+  useEffect(() => {
+    console.log('[LiveEditor] Component mounted, documentId:', documentId, 'user:', user?.email)
+    if (documentId && user && session?.access_token) {
+      console.log('[LiveEditor] Starting document fetch for:', documentId)
+      fetchDocument()
+    } else {
+      console.warn('[LiveEditor] Missing documentId, user, or session token, skipping fetch')
+    }
+  }, [documentId, user, session?.access_token])
 
   const fetchDocument = async () => {
     try {
+      if (!session?.access_token) {
+        console.error('[LiveEditor] No session token available')
+        return
+      }
+
+      console.log('[LiveEditor] Fetching document:', documentId)
       setLoading(true)
       const response = await fetch(`http://localhost:8000/api/documents/${documentId}`, {
         headers: {
-          'Authorization': `Bearer test-token`,
+          'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json'
         }
       })
 
       if (response.ok) {
         const data = await response.json()
+        console.log('[LiveEditor] Document fetched successfully:', data.filename)
+        console.log('[LiveEditor] Document entities count:', data.metadata?.entities?.length || 0)
         setDocument(data)
         setEntities(data.metadata?.entities || [])
+      } else {
+        console.error('[LiveEditor] Failed to fetch document, status:', response.status)
       }
     } catch (err) {
-      console.error('Error fetching document:', err)
+      console.error('[LiveEditor] Error fetching document:', err)
     } finally {
       setLoading(false)
     }
@@ -107,10 +129,15 @@ export default function LiveEditor() {
 
   const updateEntityRedaction = async (entityId: string, isRedacted: boolean) => {
     try {
+      if (!session?.access_token) {
+        console.error('[LiveEditor] No session token available')
+        return
+      }
+
       const response = await fetch(`http://localhost:8000/api/entities/${entityId}/approval`, {
         method: 'PUT',
         headers: {
-          'Authorization': `Bearer test-token`,
+          'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -134,9 +161,14 @@ export default function LiveEditor() {
 
   const downloadRedactedDocument = async () => {
     try {
+      if (!session?.access_token) {
+        console.error('[LiveEditor] No session token available')
+        return
+      }
+
       const response = await fetch(`http://localhost:8000/api/documents/${documentId}/download-redacted`, {
         headers: {
-          'Authorization': `Bearer test-token`
+          'Authorization': `Bearer ${session.access_token}`
         }
       })
 
@@ -160,10 +192,15 @@ export default function LiveEditor() {
   // Enhanced entity management functions
   const handleEntityPositionUpdate = async (entityId: string, newPosition: { x: number; y: number; width: number; height: number }) => {
     try {
+      if (!session?.access_token) {
+        console.error('[LiveEditor] No session token available')
+        return
+      }
+
       const response = await fetch(`http://localhost:8000/api/entities/${entityId}/position`, {
         method: 'PUT',
         headers: {
-          'Authorization': `Bearer test-token`,
+          'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(newPosition),
@@ -186,10 +223,15 @@ export default function LiveEditor() {
 
   const handleEntityDeletion = async (entityId: string) => {
     try {
+      if (!session?.access_token) {
+        console.error('[LiveEditor] No session token available')
+        return
+      }
+
       const response = await fetch(`http://localhost:8000/api/entities/${entityId}`, {
         method: 'DELETE',
         headers: {
-          'Authorization': `Bearer test-token`
+          'Authorization': `Bearer ${session.access_token}`
         }
       });
 
@@ -206,10 +248,15 @@ export default function LiveEditor() {
 
   const handleEntityCreation = async (entityData: { text: string; label: string; bounding_box: { x: number; y: number; width: number; height: number } }) => {
     try {
+      if (!session?.access_token) {
+        console.error('[LiveEditor] No session token available')
+        return
+      }
+
       const response = await fetch(`http://localhost:8000/api/entities/${documentId}/entities`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer test-token`,
+          'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -231,10 +278,7 @@ export default function LiveEditor() {
     }
   }
 
-  if (!user) {
-    router.push('/')
-    return null
-  }
+  // Removed the problematic router.push() from render - it's now in a separate useEffect above
 
   if (loading) {
     return (
@@ -507,24 +551,10 @@ export default function LiveEditor() {
 
           {/* Main Document Viewer */}
           <div className="lg:col-span-3">
-            <Card className="h-[calc(100vh-200px)]">
-              <CardHeader className="pb-3 border-b">
-                <div className="flex justify-between items-center">
-                  <CardTitle className="text-base font-medium">Document Preview</CardTitle>
-                  <div className="flex items-center space-x-2">
-                    <Button variant="outline" size="sm">
-                      <RotateCw className="h-4 w-4" />
-                    </Button>
-                    <Button variant="outline" size="sm">
-                      <Save className="h-4 w-4 mr-2" />
-                      Save Changes
-                    </Button>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="p-0 h-full">
-                <div className="relative h-full bg-gray-100">
-                  {document && (
+            <Card className="h-[calc(100vh-200px)] flex flex-col overflow-hidden">
+              <CardContent className="p-0 h-full flex-1 overflow-hidden">
+                <div className="relative w-full h-full">
+                  {document && documentId && (
                     <DocumentViewer
                       documentUrl={`http://localhost:8000/api/documents/${documentId}/file${showRedacted ? '?redacted=true' : ''}`}
                       fileType={document.file_type}
@@ -534,7 +564,6 @@ export default function LiveEditor() {
                       isEditing={true}
                       selectedTool={selectedTool}
                       onEntityClick={(entityId: string) => {
-                        // Handle entity click - could open details or toggle selection
                         const entity = entities.find(e => e.id === entityId)
                         if (entity && entity.id) {
                           updateEntityRedaction(entity.id, !entity.is_redacted)
@@ -542,7 +571,6 @@ export default function LiveEditor() {
                       }}
                       onZoomChange={(newZoom: number) => setZoom(newZoom)}
                       onEntityUpdate={(entityId: string, updates: any) => {
-                        // Handle entity updates (position, size, redaction status)
                         if (updates.bounding_box) {
                           handleEntityPositionUpdate(entityId, updates.bounding_box)
                         }
@@ -551,11 +579,9 @@ export default function LiveEditor() {
                         }
                       }}
                       onEntityDelete={(entityId: string) => {
-                        // Handle entity deletion
                         handleEntityDeletion(entityId)
                       }}
                       onEntityAdd={(entity: any) => {
-                        // Handle new entity creation
                         handleEntityCreation({
                           text: entity.text || 'Manual Redaction',
                           label: entity.label || 'MANUAL',
@@ -563,6 +589,16 @@ export default function LiveEditor() {
                         })
                       }}
                     />
+                  )}
+                  {!document && !loading && (
+                    <div className="flex items-center justify-center h-full">
+                      <p className="text-gray-600">Unable to load document</p>
+                    </div>
+                  )}
+                  {loading && (
+                    <div className="flex items-center justify-center h-full">
+                      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+                    </div>
                   )}
                 </div>
               </CardContent>
