@@ -161,6 +161,22 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         else:
             return obj
     
+    def get_and_merge_metadata(supabase, doc_id: str, new_metadata: dict):
+        """Fetch current metadata and merge with new updates"""
+        try:
+            result = supabase.table("documents").select("metadata").eq("id", doc_id).execute()
+            if result.data and result.data[0].get("metadata"):
+                current_metadata = result.data[0]["metadata"]
+                if isinstance(current_metadata, dict):
+                    # Merge: keep existing fields, update with new ones
+                    merged = {**current_metadata, **new_metadata}
+                    return merged
+        except Exception as e:
+            logger.warning(f"Could not fetch current metadata for {doc_id}: {str(e)}")
+        
+        # If fetch fails or no existing metadata, return just the new metadata
+        return new_metadata
+    
     supabase = get_supabase_client()
     logger = logging.getLogger("process_document_task")
     supabase.table("documents").update({"status": "processing"}).eq("id", document_id).execute()
@@ -194,9 +210,13 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         logger.info(f"Successfully downloaded {len(file_bytes)} bytes for document {document_id}")
         
         # Update status to indicate download completed
+        merged_metadata = get_and_merge_metadata(supabase, document_id, {
+            "stage": "download_complete",
+            "file_size_downloaded": len(file_bytes)
+        })
         supabase.table("documents").update({
             "status": "processing",
-            "metadata": {"stage": "download_complete", "file_size_downloaded": len(file_bytes)}
+            "metadata": merged_metadata
         }).eq("id", document_id).execute()
         # Save to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(storage_path)[1]) as tmp_file:
@@ -204,8 +224,12 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             tmp_file_path = tmp_file.name
         # OCR
         logger.info(f"Starting OCR for document {document_id}")
+        merged_metadata = get_and_merge_metadata(supabase, document_id, {
+            "stage": "ocr_starting",
+            "file_size_downloaded": len(file_bytes)
+        })
         supabase.table("documents").update({
-            "metadata": {"stage": "ocr_starting", "file_size_downloaded": len(file_bytes)}
+            "metadata": merged_metadata
         }).eq("id", document_id).execute()
         
         try:
@@ -220,8 +244,13 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
                 blocks = ocr_result['text_blocks']
                 
             logger.info(f"OCR completed for document {document_id}, extracted {len(full_text)} characters")
+            merged_metadata = get_and_merge_metadata(supabase, document_id, {
+                "stage": "ocr_complete",
+                "text_length": len(full_text),
+                "file_size_downloaded": len(file_bytes)
+            })
             supabase.table("documents").update({
-                "metadata": {"stage": "ocr_complete", "text_length": len(full_text), "file_size_downloaded": len(file_bytes)}
+                "metadata": merged_metadata
             }).eq("id", document_id).execute()
             
         except Exception as e:
@@ -235,16 +264,27 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         
         # PII Detection
         logger.info(f"Starting PII detection for document {document_id}")
+        merged_metadata = get_and_merge_metadata(supabase, document_id, {
+            "stage": "pii_detection_starting",
+            "text_length": len(full_text),
+            "file_size_downloaded": len(file_bytes)
+        })
         supabase.table("documents").update({
-            "metadata": {"stage": "pii_detection_starting", "text_length": len(full_text), "file_size_downloaded": len(file_bytes)}
+            "metadata": merged_metadata
         }).eq("id", document_id).execute()
         
         try:
             pii = PIIDetectionService()
             entities = pii.detect_pii(full_text)
             logger.info(f"PII detection completed for document {document_id}, found {len(entities)} entities")
+            merged_metadata = get_and_merge_metadata(supabase, document_id, {
+                "stage": "pii_detection_complete",
+                "entities_found": len(entities),
+                "text_length": len(full_text),
+                "file_size_downloaded": len(file_bytes)
+            })
             supabase.table("documents").update({
-                "metadata": {"stage": "pii_detection_complete", "entities_found": len(entities), "text_length": len(full_text), "file_size_downloaded": len(file_bytes)}
+                "metadata": merged_metadata
             }).eq("id", document_id).execute()
             
         except Exception as e:
@@ -257,8 +297,14 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         
         # Redaction
         logger.info(f"Starting redaction for document {document_id}")
+        merged_metadata = get_and_merge_metadata(supabase, document_id, {
+            "stage": "redaction_starting",
+            "entities_found": len(entities),
+            "text_length": len(full_text),
+            "file_size_downloaded": len(file_bytes)
+        })
         supabase.table("documents").update({
-            "metadata": {"stage": "redaction_starting", "entities_found": len(entities), "text_length": len(full_text), "file_size_downloaded": len(file_bytes)}
+            "metadata": merged_metadata
         }).eq("id", document_id).execute()
         
         try:
@@ -266,8 +312,14 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             redacted_path = tmp_file_path.replace('.', '_redacted.', 1)
             redaction_result = redactor.redact_document(tmp_file_path, redacted_path, entities)
             logger.info(f"Redaction completed for document {document_id}")
+            merged_metadata = get_and_merge_metadata(supabase, document_id, {
+                "stage": "redaction_complete",
+                "entities_found": len(entities),
+                "text_length": len(full_text),
+                "file_size_downloaded": len(file_bytes)
+            })
             supabase.table("documents").update({
-                "metadata": {"stage": "redaction_complete", "entities_found": len(entities), "text_length": len(full_text), "file_size_downloaded": len(file_bytes)}
+                "metadata": merged_metadata
             }).eq("id", document_id).execute()
             
         except Exception as e:
@@ -282,8 +334,14 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             shutil.copy2(tmp_file_path, redacted_path)
         # Upload redacted file
         logger.info(f"Uploading redacted file for document {document_id}")
+        merged_metadata = get_and_merge_metadata(supabase, document_id, {
+            "stage": "upload_starting",
+            "entities_found": len(entities),
+            "text_length": len(full_text),
+            "file_size_downloaded": len(file_bytes)
+        })
         supabase.table("documents").update({
-            "metadata": {"stage": "upload_starting", "entities_found": len(entities), "text_length": len(full_text), "file_size_downloaded": len(file_bytes)}
+            "metadata": merged_metadata
         }).eq("id", document_id).execute()
         
         with open(redacted_path, "rb") as f:
@@ -298,17 +356,18 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         logger.info(f"Upload completed for document {document_id}")
         
         # Update DB with processed status and redacted file path
+        merged_metadata = get_and_merge_metadata(supabase, document_id, {
+            "stage": "completed",
+            "entities": make_json_serializable(entities), 
+            "redacted_storage_path": redacted_storage_path,
+            "entities_found": len(entities),
+            "text_length": len(full_text),
+            "file_size_downloaded": len(file_bytes),
+            "redacted_file_size": len(redacted_bytes)
+        })
         supabase.table("documents").update({
             "status": "processed",
-            "metadata": {
-                "stage": "completed",
-                "entities": make_json_serializable(entities), 
-                "redacted_storage_path": redacted_storage_path,
-                "entities_found": len(entities),
-                "text_length": len(full_text),
-                "file_size_downloaded": len(file_bytes),
-                "redacted_file_size": len(redacted_bytes)
-            }
+            "metadata": merged_metadata
         }).eq("id", document_id).execute()
         
         # Store entities in simplified redaction session (optional)
@@ -444,13 +503,27 @@ async def delete_document(
     try:
         supabase = get_supabase_client()
         
+        print(f"[DEBUG] Attempting to delete document: {document_id} for user: {current_user.id}")
+        
         # Get document to verify ownership and get storage path
         doc_response = supabase.table("documents").select("*").eq("id", document_id).eq("user_id", current_user.id).execute()
         
+        print(f"[DEBUG] Query result: {doc_response.data}")
+        
         if not doc_response.data:
+            print(f"[DEBUG] Document not found - trying alternative queries")
+            
+            # Try checking if document exists at all
+            all_doc_response = supabase.table("documents").select("id, user_id").eq("id", document_id).execute()
+            print(f"[DEBUG] Document exists in DB: {all_doc_response.data}")
+            
+            if all_doc_response.data:
+                doc_user_id = all_doc_response.data[0].get("user_id")
+                print(f"[DEBUG] Document belongs to user: {doc_user_id}, request from user: {current_user.id}")
+            
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document not found"
+                detail="Document not found or you don't have permission to delete it"
             )
         
         document = doc_response.data[0]
@@ -461,10 +534,12 @@ async def delete_document(
         # Delete from database
         supabase.table("documents").delete().eq("id", document_id).eq("user_id", current_user.id).execute()
         
+        print(f"[DEBUG] Document {document_id} deleted successfully")
         return {"message": "Document deleted successfully"}
     except HTTPException:
         raise
     except Exception as e:
+        print(f"[DEBUG] Error deleting document: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete document: {str(e)}"

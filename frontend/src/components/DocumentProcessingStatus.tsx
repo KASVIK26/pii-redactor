@@ -65,6 +65,7 @@ const getStageStatus = (currentStage: string | undefined, targetStage: string, d
   
   if (targetIndex < currentIndex) return 'completed'
   if (targetIndex === currentIndex) {
+    // Check if this is a "starting" stage (currently processing) or a "complete" stage (just finished)
     return currentStage.includes('starting') ? 'processing' : 'completed'
   }
   if (targetIndex === currentIndex + 1 && currentStage.includes('starting')) {
@@ -231,7 +232,7 @@ export function DocumentProcessingStatus({ document }: DocumentProcessingStatusP
                 </div>
               </div>
               
-              <Badge variant="outline" className="text-xs">
+              <Badge variant="outline" className="text-xs whitespace-nowrap">
                 {stage.status === 'processing' ? 'Running...' : 
                  stage.status === 'completed' ? 'Done' :
                  stage.status === 'failed' ? 'Failed' : 'Waiting'}

@@ -17,7 +17,7 @@ interface UploadedFile {
 }
 
 interface FileUploadProps {
-  onUploadComplete?: (fileId: string) => void
+  onUploadComplete?: (fileId: string, filename: string, fileSize: number, fileType: string) => void
 }
 
 export function FileUpload({ onUploadComplete }: FileUploadProps) {
@@ -93,7 +93,13 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
       ));
 
       if (onUploadComplete && data.document_id) {
-        onUploadComplete(data.document_id);
+        const fileType = uploadFile.file.type.split('/').pop() || 'unknown'
+        onUploadComplete(
+          data.document_id, 
+          uploadFile.file.name, 
+          uploadFile.file.size,
+          fileType
+        );
       }
     } catch (error) {
       console.error('Upload error:', error);

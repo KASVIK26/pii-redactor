@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -10,6 +10,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { formatDistanceToNow } from 'date-fns'
 import { DocumentProcessingStatus } from './DocumentProcessingStatus'
 import EntityReview from './EntityReview'
+import { DeleteConfirmModal } from './DeleteConfirmModal'
 
 interface Document {
   id: string
@@ -77,22 +78,65 @@ const formatFileSize = (bytes: number) => {
 }
 
 export function RecentDocuments() {
-  const { documents, loading, error, deleteDocument } = useDocuments()
+  const { documents, loading: initialLoading, initialLoadComplete, error, deleteDocument } = useDocuments()
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false)
+  const [deleteDocumentName, setDeleteDocumentName] = useState('')
+  const [, setRefreshTrigger] = useState(0)
   const [downloadingId, setDownloadingId] = useState<string | null>(null)
   const [entityReviewDocId, setEntityReviewDocId] = useState<string | null>(null)
   const { session } = useAuth()
 
-  const handleDelete = async (documentId: string) => {
-    if (confirm('Are you sure you want to delete this document? This action cannot be undone.')) {
-      setDeletingId(documentId)
-      const success = await deleteDocument(documentId)
-      setDeletingId(null)
-      
-      if (!success) {
-        alert('Failed to delete document. Please try again.')
-      }
+  // Log when documents change
+  useEffect(() => {
+    console.log('[RecentDocuments] documents CHANGED:', documents.length, documents.map(d => ({ id: d.id, name: d.original_filename })))
+  }, [documents])
+
+  const handleDeleteClick = (documentId: string, filename: string) => {
+    console.log('[RecentDocuments] Delete button clicked:', { documentId, filename })
+    setDeletingId(documentId)
+    setDeleteDocumentName(filename)
+    setDeleteModalOpen(true)
+    console.log('[RecentDocuments] Modal opened for deletion')
+  }
+
+  const handleDeleteConfirm = async () => {
+    if (!deletingId) {
+      console.log('[RecentDocuments] No deletingId set')
+      return
     }
+    
+    console.log('[RecentDocuments] DELETE STARTED - documentId:', deletingId)
+    console.log('[RecentDocuments] All documents before delete:', documents.length, documents.map(d => ({ id: d.id, name: d.original_filename })))
+    
+    setIsDeleting(true)
+    const success = await deleteDocument(deletingId)
+    console.log('[RecentDocuments] deleteDocument returned:', success)
+    
+    setIsDeleting(false)
+    
+    setDeleteModalOpen(false)
+    setDeletingId(null)
+    setDeleteDocumentName('')
+    
+    console.log('[RecentDocuments] All documents after delete:', documents.length, documents.map(d => ({ id: d.id, name: d.original_filename })))
+    
+    if (!success) {
+      console.error('[RecentDocuments] DELETE FAILED')
+      alert('Failed to delete document. Please try again.')
+    } else {
+      console.log('[RecentDocuments] DELETE SUCCESS - forcing re-render')
+      // Force re-render to get latest documents array
+      setRefreshTrigger(prev => prev + 1)
+    }
+  }
+
+  const handleDeleteCancel = () => {
+    console.log('[RecentDocuments] Delete cancelled by user')
+    setDeleteModalOpen(false)
+    setDeletingId(null)
+    setDeleteDocumentName('')
   }
 
   const handleDownload = async (documentId: string, filename: string) => {
@@ -127,7 +171,8 @@ export function RecentDocuments() {
     }
   }
 
-  if (loading) {
+  // Only show loading on initial load, not during polling updates
+  if (!initialLoadComplete) {
     return (
       <Card>
         <CardHeader>
@@ -261,7 +306,7 @@ export function RecentDocuments() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => handleDelete(document.id)}
+                      onClick={() => handleDeleteClick(document.id, document.original_filename)}
                       disabled={deletingId === document.id}
                       className="text-red-600 hover:text-red-700"
                     >
@@ -311,6 +356,17 @@ export function RecentDocuments() {
           onClose={() => setEntityReviewDocId(null)} 
         />
       )}
+
+      {/* Delete Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={deleteModalOpen}
+        title="Delete Document"
+        message="This action cannot be undone. The document and all its data will be permanently deleted."
+        filename={deleteDocumentName}
+        isLoading={isDeleting}
+        onConfirm={handleDeleteConfirm}
+        onCancel={handleDeleteCancel}
+      />
     </>
   )
 }

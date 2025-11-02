@@ -1,6 +1,5 @@
 'use client'
 
-import { useState } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -10,7 +9,17 @@ import { useDocuments } from '@/hooks/useDocuments'
 
 export default function Dashboard() {
   const { user, signOut } = useAuth()
-  const { refreshDocuments, documents } = useDocuments()
+  const { documents, addDocumentToQueue } = useDocuments()
+
+  // Always compute from documents array - simple and reliable
+  const totalDocuments = documents.length
+  const totalEntities = documents.reduce((acc, doc) => {
+    const entities = doc.metadata?.entities || []
+    return acc + (Array.isArray(entities) ? entities.length : 0)
+  }, 0)
+
+  console.log('[Dashboard] RENDER - docs:', totalDocuments, 'entities:', totalEntities)
+  console.log('[Dashboard] Documents array:', documents.map(d => ({ id: d.id, name: d.original_filename, entities: d.metadata?.entities?.length || 0 })))
 
   const handleSignOut = () => {
     signOut()
@@ -49,10 +58,10 @@ export default function Dashboard() {
           
           {/* Upload Section */}
           <div className="lg:col-span-2">
-            <FileUpload onUploadComplete={(fileId) => {
+            <FileUpload onUploadComplete={(fileId, filename, fileSize, fileType) => {
               console.log('File uploaded:', fileId)
-              // Refresh document list after upload
-              refreshDocuments()
+              // Add document to queue immediately for real-time tracking
+              addDocumentToQueue(fileId, filename, fileSize, fileType)
             }} />
           </div>
 
@@ -64,7 +73,7 @@ export default function Dashboard() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold text-blue-600">
-                  {documents.length}
+                  {totalDocuments}
                 </div>
                 <p className="text-sm text-gray-500">Total documents</p>
               </CardContent>
@@ -76,7 +85,7 @@ export default function Dashboard() {
               </CardHeader>
               <CardContent>
                 <div className="text-3xl font-bold text-red-600">
-                  {documents.reduce((acc, doc) => acc + (doc.metadata?.entities?.length || 0), 0)}
+                  {totalEntities}
                 </div>
                 <p className="text-sm text-gray-500">Entities detected</p>
               </CardContent>

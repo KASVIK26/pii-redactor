@@ -200,13 +200,13 @@ export default function InteractiveRedactionOverlay({
             <div
               key={box.id}
               className={className}
-              style={{
-                ...style,
-                left: box.x,
-                top: box.y,
-                width: box.width,
-                height: box.height,
-              }}
+                style={{
+                  ...style,
+                  left: box.x,
+                  top: box.y,
+                  width: isNaN(box.width) ? 0 : box.width,
+                  height: isNaN(box.height) ? 0 : box.height,
+                }}
               onClick={(e) => handleBoxClick(box.id, e)}
               title={`${box.text || 'Redaction'} (${box.label || 'UNKNOWN'})`}
             >
@@ -228,12 +228,12 @@ export default function InteractiveRedactionOverlay({
             animate={{ x: box.x, y: box.y }}
             onDragEnd={(event, info) => handleDragStop(box.id, info)}
             className="absolute"
-            style={{
-              width: box.width,
-              height: box.height,
-              left: 0,
-              top: 0,
-            }}
+              style={{
+                width: isNaN(box.width) ? 0 : box.width,
+                height: isNaN(box.height) ? 0 : box.height,
+                left: 0,
+                top: 0,
+              }}
           >
             <div
               className={className}
