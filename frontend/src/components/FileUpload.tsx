@@ -114,9 +114,7 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'application/pdf': ['.pdf'],
-      'image/png': ['.png'],
-      'image/jpeg': ['.jpg', '.jpeg'],
+      'application/pdf': ['.pdf']
     },
     maxSize: 10 * 1024 * 1024, // 10MB
     maxFiles: 5
@@ -131,7 +129,7 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
       <CardHeader>
         <CardTitle>Upload Documents</CardTitle>
         <CardDescription>
-          Upload PDF files or images (PNG, JPG) to detect and redact PII
+          Upload PDF files to detect and redact PII
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -157,7 +155,7 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
                 }
               </p>
               <p className="text-sm text-gray-500">
-                or click to browse (PDF, PNG, JPG - max 10MB each)
+                or click to browse (PDF - max 10MB each)
               </p>
             </div>
             {!isDragActive && (

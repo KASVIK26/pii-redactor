@@ -5,13 +5,14 @@
 
 'use client';
 
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { PDFViewerSimple } from '@/components/PDFViewerSimple';
 import { EntityOverlay } from '@/components/EntityOverlay';
 import { EntityListSidebar } from '@/components/EntityListSidebar';
 import { useRedactionStore } from '@/stores/redactionStore';
 import { Entity } from '@/types/redaction';
 import { Button } from '@/components/ui/button';
+import { getRedactedFilename } from '@/lib/utils';
 import {
   AlertCircle,
   FileCheck,
@@ -30,6 +31,7 @@ import {
 interface LiveRedactionEditorProps {
   documentId: string;
   pdfUrl: string;
+  filename: string;
   entities: Entity[];
   accessToken: string;
   onRedactionComplete?: (result: any) => void;
@@ -39,6 +41,7 @@ interface LiveRedactionEditorProps {
 export const LiveRedactionEditor: React.FC<LiveRedactionEditorProps> = ({
   documentId,
   pdfUrl,
+  filename,
   entities,
   accessToken,
   onRedactionComplete,
@@ -74,6 +77,10 @@ export const LiveRedactionEditor: React.FC<LiveRedactionEditorProps> = ({
   // Memoize the total redactions calculation to prevent re-renders
   // Dependencies: [approvedCount, customCount] ensures recalculation when redactions change
   const totalRedactions = React.useMemo(() => getTotalRedactions(), [approvedCount, customCount]);
+
+  // Use provided filename and format it for download with _redacted suffix
+  const displayFilename = useMemo(() => filename, [filename]);
+  const redactedFilename = useMemo(() => getRedactedFilename(filename), [filename]);
 
   // Track container size
   useEffect(() => {
@@ -179,13 +186,13 @@ export const LiveRedactionEditor: React.FC<LiveRedactionEditorProps> = ({
           
           const link = document.createElement('a');
           link.href = URL.createObjectURL(blob);
-          link.download = `redacted_${documentId}.pdf`;
+          link.download = redactedFilename;
           document.body.appendChild(link);
           link.click();
           document.body.removeChild(link);
           URL.revokeObjectURL(link.href);
           
-          console.log('[LiveRedactionEditor] File downloaded successfully');
+          console.log('[LiveRedactionEditor] File downloaded as:', redactedFilename);
         } catch (downloadErr) {
           const msg = downloadErr instanceof Error ? downloadErr.message : 'Failed to download redacted PDF';
           console.error('[LiveRedactionEditor] Download error:', msg);
@@ -247,7 +254,7 @@ export const LiveRedactionEditor: React.FC<LiveRedactionEditorProps> = ({
           </Button>
           <div>
             <h1 className="text-xl font-bold text-white">Redaction Editor</h1>
-            <p className="text-xs text-gray-400">college_receipt.pdf</p>
+            <p className="text-xs text-gray-400">{displayFilename}</p>
           </div>
         </div>
 

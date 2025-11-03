@@ -15,6 +15,7 @@ export default function EditorPage() {
   const [loading, setLoading] = useState(true)
   const [entities, setEntities] = useState<Entity[]>([])
   const [pdfUrl, setPdfUrl] = useState<string>('')
+  const [filename, setFilename] = useState<string>('document.pdf')
 
   // Fetch entities when component mounts
   useEffect(() => {
@@ -38,6 +39,11 @@ export default function EditorPage() {
         if (response.ok) {
           const document = await response.json()
           console.log('[Editor] Document fetched:', document)
+          
+          // Extract filename from document
+          const docFilename = document.original_filename || document.filename || 'document.pdf'
+          console.log('[Editor] Document filename:', docFilename)
+          setFilename(docFilename)
           
           // Extract entities from metadata
           const entitiesFromMetadata = document.metadata?.entities || []
@@ -76,6 +82,7 @@ export default function EditorPage() {
     <LiveRedactionEditor
       documentId={documentId}
       pdfUrl={pdfUrl}
+      filename={filename}
       entities={entities}
       accessToken={session?.access_token || ''}
       onRedactionComplete={(result) => {

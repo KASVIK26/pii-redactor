@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
+import { fetchMetrics } from '@/lib/metricsHelper'
 
 interface Document {
   id: string
@@ -30,18 +31,24 @@ export const useDocuments = () => {
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const isPollingRef = useRef<boolean>(false)
   const processingDocIdsRef = useRef<Set<string>>(new Set())
+  const fetchDocumentsRef = useRef<((forceRefresh?: boolean) => Promise<void>) | null>(null)
 
   const fetchDocuments = useCallback(async (forceRefresh = false) => {
-    if (!user || !session?.access_token) return
+    if (!user || !session?.access_token) {
+      console.log('[useDocuments] FETCH SKIPPED - no user or token')
+      return
+    }
     
     const now = Date.now()
+    
+    // Only use cache if not forcing refresh AND cache is still fresh AND we have documents
     if (!forceRefresh && documents.length > 0 && (now - lastFetchTime.current) < cacheTimeout) {
-      console.log('[useDocuments] FETCH SKIPPED - using cache')
+      console.log('[useDocuments] FETCH SKIPPED - using cache (age:', now - lastFetchTime.current, 'ms)')
       setLoading(false)
       return
     }
     
-    console.log('[useDocuments] FETCH STARTED - forceRefresh:', forceRefresh)
+    console.log('[useDocuments] FETCH STARTED - forceRefresh:', forceRefresh, 'cacheAge:', now - lastFetchTime.current, 'currentDocs:', documents.length)
     
     try {
       setLoading(true)
@@ -59,23 +66,45 @@ export const useDocuments = () => {
       }
 
       const data = await response.json()
-      console.log('[useDocuments] FETCH response:', data.length, 'documents from server')
+      console.log('[useDocuments] FETCH response received:', data.length, 'documents')
+      console.log('[useDocuments] Response sample:', data.slice(0, 2).map((d: Document) => ({ id: d.id, name: d.original_filename, status: d.status })))
 
-      // Just replace with server data - don't try to merge local changes
-      setDocuments(data)
-      console.log('[useDocuments] Documents set to server response:', data.length)
+      // Merge server data with local data (preserve locally-added documents that might not be on server yet)
+      setDocuments(prevDocs => {
+        const serverIds = new Set(data.map((d: Document) => d.id))
+        
+        // Keep locally-added docs that aren't on server yet, but update ones that are on server
+        const merged = [
+          // First, updated server documents
+          ...data,
+          // Then, locally-added documents that don't exist on server yet
+          ...prevDocs.filter(doc => !serverIds.has(doc.id))
+        ]
+        
+        console.log('[useDocuments] Merged documents - server:', data.length, 'local-only:', prevDocs.filter(doc => !serverIds.has(doc.id)).length, 'total:', merged.length)
+        
+        // Update processing docs tracking from merged data
+        const processingIds = new Set(
+          merged
+            .filter((doc: Document) => doc.status === 'processing' || doc.status === 'queued')
+            .map((doc: Document) => doc.id)
+        ) as Set<string>
+        
+        const previousCount = processingDocIdsRef.current.size
+        processingDocIdsRef.current = processingIds
+        
+        console.log('[useDocuments] Processing docs from merged:', processingIds.size, '(was:', previousCount, ')')
+        
+        if (processingIds.size !== previousCount) {
+          setProcessingCount(processingIds.size)
+          console.log('[useDocuments] Processing count updated to:', processingIds.size)
+        }
+        
+        return merged
+      })
+      console.log('[useDocuments] Documents state updated with merge')
       
       lastFetchTime.current = now
-
-      // Update processing docs tracking
-      const processingIds = new Set(
-        data
-          .filter((doc: Document) => doc.status === 'processing' || doc.status === 'queued')
-          .map((doc: Document) => doc.id)
-      ) as Set<string>
-      processingDocIdsRef.current = processingIds
-      setProcessingCount(processingIds.size)
-      
       console.log('[useDocuments] FETCH COMPLETE')
     } catch (err) {
       console.error('[useDocuments] FETCH ERROR:', err)
@@ -83,10 +112,16 @@ export const useDocuments = () => {
     } finally {
       setLoading(false)
       if (!initialLoadComplete) {
+        console.log('[useDocuments] Setting initialLoadComplete to true')
         setInitialLoadComplete(true)
       }
     }
-  }, [user, session?.access_token, documents.length])
+  }, [user, session?.access_token, documents.length, initialLoadComplete])
+
+  // Keep ref up to date with latest fetchDocuments function
+  useEffect(() => {
+    fetchDocumentsRef.current = fetchDocuments
+  }, [fetchDocuments])
 
   const deleteDocument = useCallback(async (documentId: string) => {
     console.log('[useDocuments] DELETE STARTED for:', documentId)
@@ -117,7 +152,7 @@ export const useDocuments = () => {
 
       console.log('[useDocuments] Backend confirmed deletion, now updating local state...')
       
-      // Remove from state - Dashboard will auto-update
+      // Remove from state
       setDocuments(prev => {
         console.log('[useDocuments] setDocuments callback - prev length:', prev.length)
         const newDocs = prev.filter(doc => doc.id !== documentId)
@@ -128,6 +163,13 @@ export const useDocuments = () => {
       
       console.log('[useDocuments] Clearing cache...')
       lastFetchTime.current = 0
+      
+      // Fetch fresh metrics after successful delete for Dashboard refresh
+      console.log('[useDocuments] Fetching fresh metrics after delete...')
+      if (user?.id) {
+        const metrics = await fetchMetrics(user.id)
+        console.log('[useDocuments] Fresh metrics received:', metrics)
+      }
       
       console.log('[useDocuments] DELETE COMPLETED SUCCESSFULLY')
       return true
@@ -145,6 +187,8 @@ export const useDocuments = () => {
 
   // Function to add a new document to the list (called when file is uploaded)
   const addDocumentToQueue = useCallback((documentId: string, filename: string, fileSize: number, fileType: string) => {
+    console.log('[useDocuments] addDocumentToQueue - Adding new document:', documentId, filename)
+    
     const newDoc: Document = {
       id: documentId,
       user_id: user?.id || '',
@@ -166,15 +210,33 @@ export const useDocuments = () => {
       }
     }
     
-    setDocuments(prev => [newDoc, ...prev])
+    console.log('[useDocuments] addDocumentToQueue - Setting document and processing count')
+    setDocuments(prev => {
+      console.log('[useDocuments] addDocumentToQueue - setDocuments callback, prev length:', prev.length)
+      const updated = [newDoc, ...prev]
+      console.log('[useDocuments] addDocumentToQueue - Updated docs length:', updated.length)
+      return updated
+    })
+    
     processingDocIdsRef.current.add(documentId)
-    setProcessingCount(prev => prev + 1)
+    setProcessingCount(prev => {
+      const newCount = prev + 1
+      console.log('[useDocuments] addDocumentToQueue - setProcessingCount:', prev, '→', newCount)
+      return newCount
+    })
+    
+    // Clear cache to force immediate fetch
+    lastFetchTime.current = 0
+    console.log('[useDocuments] addDocumentToQueue - Cleared cache, document added to list')
   }, [user?.id])
 
   // Setup polling with smart detection
   useEffect(() => {
+    console.log('[useDocuments] Polling effect triggered - processingCount:', processingCount, 'user:', !!user, 'token:', !!session?.access_token)
+    
     // Only poll if there are processing documents
     if (processingCount === 0 || !user || !session?.access_token) {
+      console.log('[useDocuments] Stopping polling - no processing documents or no auth')
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current)
         pollIntervalRef.current = null
@@ -185,38 +247,49 @@ export const useDocuments = () => {
 
     // Start polling
     if (isPollingRef.current) {
+      console.log('[useDocuments] Already polling, skipping setup')
       return
     }
     
+    console.log('[useDocuments] Starting polling - processingCount:', processingCount)
     isPollingRef.current = true
 
-    // Initial immediate fetch
-    fetchDocuments(true)
+    // Initial immediate fetch (no delay)
+    console.log('[useDocuments] Initial fetch started immediately')
+    if (fetchDocumentsRef.current) {
+      fetchDocumentsRef.current(true)
+    }
 
-    // Then poll every 2 seconds
+    // Then poll every 1.5 seconds for faster updates during processing
     pollIntervalRef.current = setInterval(() => {
-      fetchDocuments(true)
-    }, 2000)
+      console.log('[useDocuments] Poll interval triggered')
+      if (fetchDocumentsRef.current) {
+        fetchDocumentsRef.current(true)
+      }
+    }, 1500)
 
     return () => {
+      console.log('[useDocuments] Cleaning up polling')
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current)
         pollIntervalRef.current = null
       }
       isPollingRef.current = false
     }
-  }, [user, session?.access_token, fetchDocuments, processingCount])
+  }, [processingCount, user, session?.access_token])
 
   // Handle page visibility and focus changes
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (!document.hidden) {
-        fetchDocuments(true)
+      if (!document.hidden && fetchDocumentsRef.current) {
+        fetchDocumentsRef.current(true)
       }
     }
 
     const handleFocus = () => {
-      fetchDocuments(true)
+      if (fetchDocumentsRef.current) {
+        fetchDocumentsRef.current(true)
+      }
     }
 
     document.addEventListener('visibilitychange', handleVisibilityChange)
@@ -226,14 +299,14 @@ export const useDocuments = () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('focus', handleFocus)
     }
-  }, [fetchDocuments])
+  }, [])
 
   // Initial fetch when user/session changes
   useEffect(() => {
-    if (user && session?.access_token) {
-      fetchDocuments(true)
+    if (user && session?.access_token && fetchDocumentsRef.current) {
+      fetchDocumentsRef.current(true)
     }
-  }, [user, session?.access_token, fetchDocuments])
+  }, [user, session?.access_token])
 
   return {
     documents,

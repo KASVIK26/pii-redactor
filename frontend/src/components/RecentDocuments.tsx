@@ -78,7 +78,7 @@ const formatFileSize = (bytes: number) => {
 }
 
 export function RecentDocuments() {
-  const { documents, loading: initialLoading, initialLoadComplete, error, deleteDocument } = useDocuments()
+  const { documents, loading: initialLoading, initialLoadComplete, error, deleteDocument, refreshDocuments } = useDocuments()
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
@@ -88,9 +88,12 @@ export function RecentDocuments() {
   const [entityReviewDocId, setEntityReviewDocId] = useState<string | null>(null)
   const { session } = useAuth()
 
-  // Log when documents change
+  // Log when documents change with detailed info
   useEffect(() => {
-    console.log('[RecentDocuments] documents CHANGED:', documents.length, documents.map(d => ({ id: d.id, name: d.original_filename })))
+    console.log('[RecentDocuments] RENDER - documents changed:', documents.length)
+    documents.forEach((doc, idx) => {
+      console.log(`  [${idx}] ${doc.original_filename} - status: ${doc.status}, id: ${doc.id.substring(0, 8)}...`)
+    })
   }, [documents])
 
   const handleDeleteClick = (documentId: string, filename: string) => {
@@ -126,9 +129,12 @@ export function RecentDocuments() {
       console.error('[RecentDocuments] DELETE FAILED')
       alert('Failed to delete document. Please try again.')
     } else {
-      console.log('[RecentDocuments] DELETE SUCCESS - forcing re-render')
-      // Force re-render to get latest documents array
-      setRefreshTrigger(prev => prev + 1)
+      console.log('[RecentDocuments] DELETE SUCCESS - triggering metrics refresh')
+      // Trigger a fresh fetch to update dashboard metrics
+      setTimeout(() => {
+        console.log('[RecentDocuments] Calling refreshDocuments to update metrics')
+        refreshDocuments()
+      }, 500)
     }
   }
 

@@ -6,10 +6,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { FileUpload } from '@/components/FileUpload'
 import { RecentDocuments } from './RecentDocuments'
 import { useDocuments } from '@/hooks/useDocuments'
+import { useEffect, useState } from 'react'
 
 export default function Dashboard() {
   const { user, signOut } = useAuth()
   const { documents, addDocumentToQueue } = useDocuments()
+  const [metricsKey, setMetricsKey] = useState(0)
 
   // Always compute from documents array - simple and reliable
   const totalDocuments = documents.length
@@ -18,8 +20,14 @@ export default function Dashboard() {
     return acc + (Array.isArray(entities) ? entities.length : 0)
   }, 0)
 
-  console.log('[Dashboard] RENDER - docs:', totalDocuments, 'entities:', totalEntities)
-  console.log('[Dashboard] Documents array:', documents.map(d => ({ id: d.id, name: d.original_filename, entities: d.metadata?.entities?.length || 0 })))
+  // Watch for document changes and trigger re-render
+  useEffect(() => {
+    console.log('[Dashboard] Documents changed - triggering metrics update')
+    console.log('[Dashboard] RENDER - docs:', totalDocuments, 'entities:', totalEntities)
+    console.log('[Dashboard] Documents array:', documents.map(d => ({ id: d.id, name: d.original_filename, entities: d.metadata?.entities?.length || 0 })))
+    // Trigger state update to force re-render with new metrics
+    setMetricsKey(prev => prev + 1)
+  }, [documents, totalDocuments, totalEntities])
 
   const handleSignOut = () => {
     signOut()
@@ -67,7 +75,7 @@ export default function Dashboard() {
 
           {/* Quick Stats Sidebar */}
           <div className="space-y-6">
-            <Card>
+            <Card key={`docs-${metricsKey}`}>
               <CardHeader>
                 <CardTitle>Documents Processed</CardTitle>
               </CardHeader>
@@ -79,7 +87,7 @@ export default function Dashboard() {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card key={`entities-${metricsKey}`}>
               <CardHeader>
                 <CardTitle>PII Entities Found</CardTitle>
               </CardHeader>
