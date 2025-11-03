@@ -145,35 +145,69 @@ export function RecentDocuments() {
     setDeleteDocumentName('')
   }
 
-  const handleDownload = async (documentId: string, filename: string) => {
-    if (!session?.access_token) return
+  const handleDownload = async (documentId: string, filename: string, isProcessed: boolean) => {
+    if (!session?.access_token) {
+      alert('Authentication token missing')
+      return
+    }
     
+    // Prevent multiple simultaneous downloads
+    if (downloadingId) {
+      console.log('[RecentDocuments] Already downloading, ignoring click')
+      return
+    }
+    
+    console.log('[RecentDocuments] Download initiated for:', documentId)
     setDownloadingId(documentId)
+    
     try {
-      const response = await fetch(`http://localhost:8000/api/documents/${documentId}/download`, {
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`,
-        },
+      // Build download URL
+      const baseUrl = `http://localhost:8000/api/documents/${documentId}/download`
+      const url = isProcessed ? `${baseUrl}?redacted=true` : baseUrl
+      
+      console.log('[RecentDocuments] Requesting:', url)
+      
+      // Fetch with timeout
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 30000) // 30s timeout
+      
+      const response = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${session.access_token}` },
+        signal: controller.signal
       })
-
+      
+      clearTimeout(timeoutId)
+      
       if (!response.ok) {
-        throw new Error(`Download failed: ${response.status}`)
+        const errorText = await response.text()
+        throw new Error(`Server error ${response.status}: ${errorText}`)
       }
 
-      // Create blob and download
+      // Get file blob
       const blob = await response.blob()
-      const url = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      document.body.appendChild(a)
-      a.click()
-      window.URL.revokeObjectURL(url)
-      document.body.removeChild(a)
-    } catch (err) {
-      alert(`Failed to download: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      console.log(`[RecentDocuments] Download successful: ${blob.size} bytes`)
+      
+      // Trigger browser download
+      const blobUrl = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = blobUrl
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      
+      // Cleanup
+      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 100)
+      console.log('[RecentDocuments] File download triggered')
+      
+    } catch (error) {
+      console.error('[RecentDocuments] Download failed:', error)
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      alert(`Download failed: ${errorMessage}`)
     } finally {
+      // Always clear loading state
       setDownloadingId(null)
+      console.log('[RecentDocuments] Download handler complete, loading state cleared')
     }
   }
 
@@ -286,7 +320,7 @@ export function RecentDocuments() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => handleDownload(document.id, document.original_filename)}
+                          onClick={() => handleDownload(document.id, document.original_filename, true)}
                           disabled={downloadingId === document.id}
                           className="text-green-600 hover:text-green-700"
                         >

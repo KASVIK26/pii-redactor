@@ -115,9 +115,19 @@ async def upload_document(
     current_user = Depends(get_current_user)
 ):
     """Upload a document for PII redaction"""
+    import time
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    start_time = time.time()
+    logger.info(f"Upload started for file: {file.filename}")
     
     # Validate file
+    read_start = time.time()
     content = await file.read()
+    read_time = time.time() - read_start
+    logger.info(f"File read: {len(content)} bytes in {read_time:.2f}s")
+    
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -128,19 +138,26 @@ async def upload_document(
     storage_path = f"{document_id}{file_extension}"
     try:
         supabase = get_supabase_client()
+        
         # Upload to Supabase Storage
+        storage_start = time.time()
         storage_response = supabase.storage.from_("documents").upload(
             storage_path, 
             content,
             file_options={"content-type": file.content_type}
         )
+        storage_time = time.time() - storage_start
+        logger.info(f"Storage upload: {storage_time:.2f}s")
+        
         # Check for upload errors - Supabase storage response format varies
         if hasattr(storage_response, 'error') and storage_response.error:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to upload file to storage: {storage_response.error}"
             )
+        
         # Save metadata to database
+        db_start = time.time()
         db_response = supabase.table("documents").insert({
             "id": document_id,
             "user_id": current_user.id,
@@ -152,6 +169,9 @@ async def upload_document(
             "storage_path": storage_path,
             "status": "queued"
         }).execute()
+        db_time = time.time() - db_start
+        logger.info(f"DB insert: {db_time:.2f}s")
+        
         if not db_response.data or (hasattr(db_response, 'error') and db_response.error):
             # Clean up storage if DB insert fails
             supabase.storage.from_("documents").remove([storage_path])
@@ -160,6 +180,7 @@ async def upload_document(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to save document metadata: {error_msg}"
             )
+        
         # Queue background processing for PII detection/redaction
         # Use threading instead of BackgroundTasks for more reliable execution
         thread = threading.Thread(
@@ -168,6 +189,10 @@ async def upload_document(
             daemon=False
         )
         thread.start()
+        
+        total_time = time.time() - start_time
+        logger.info(f"Upload complete in {total_time:.2f}s - returning response")
+        
         return DocumentUploadResponse(
             document_id=document_id,
             filename=file.filename,
@@ -176,6 +201,9 @@ async def upload_document(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        logger.error(f"Upload failed: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Upload failed: {str(e)}"
@@ -620,34 +648,87 @@ async def get_document_file(
 @router.get("/{document_id}/download")
 async def download_document(
     document_id: str,
-    redacted: bool = False
+    redacted: bool = False,
+    current_user = Depends(get_current_user)
 ):
-    """Download the document file (original or redacted) - same as /file but for downloads"""
+    """Download the document file (original or redacted)"""
+    import time
+    import logging
+    import uuid
+    logger = logging.getLogger(__name__)
+    
+    # Generate unique request ID for this download
+    request_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+    logger.info(f"[DOWNLOAD {request_id}] Started: document_id={document_id}, redacted={redacted}, user={current_user.id}")
     
     try:
         supabase = get_supabase_client()
         
         # Get document metadata
+        db_start = time.time()
         doc_response = supabase.table("documents").select("*").eq("id", document_id).execute()
+        db_time = time.time() - db_start
+        logger.info(f"[DOWNLOAD {request_id}] DB query: {db_time:.2f}s")
         
         if not doc_response.data:
+            logger.error(f"[DOWNLOAD {request_id}] Document not found: {document_id}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Document not found"
             )
         
         document = doc_response.data[0]
+        logger.info(f"[DOWNLOAD {request_id}] Document owner: {document['user_id']}, requested by: {current_user.id}")
+        
+        # Verify ownership
+        if document["user_id"] != current_user.id:
+            logger.error(f"[DOWNLOAD {request_id}] Access denied: document owner={document['user_id']}, user={current_user.id}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to download this document"
+            )
         
         # Determine which file to serve
-        if redacted and document.get("metadata", {}).get("redacted_storage_path"):
-            file_path = document["metadata"]["redacted_storage_path"]
+        if redacted:
+            # Check if document has been processed and has redacted file
+            if document.get("status") != "processed":
+                logger.error(f"[DOWNLOAD {request_id}] Document not processed yet: status={document['status']}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Document has not been processed yet (status: {document['status']})"
+                )
+            
+            redacted_path = document.get("metadata", {}).get("redacted_storage_path") if document.get("metadata") else None
+            
+            if not redacted_path:
+                logger.error(f"[DOWNLOAD {request_id}] No redacted file found for: {document_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Redacted file not found"
+                )
+            
+            file_path = redacted_path
+            # Clean path
+            while file_path.startswith("documents/"):
+                file_path = file_path.replace("documents/", "", 1)
+            
             filename = document['original_filename'].rsplit('.', 1)[0] + '_redacted.' + document['original_filename'].rsplit('.', 1)[1] if '.' in document['original_filename'] else document['original_filename'] + '_redacted'
+            logger.info(f"[DOWNLOAD {request_id}] Serving redacted file: {file_path} as {filename}")
         else:
             file_path = document["storage_path"]
             filename = document['original_filename']
+            logger.info(f"[DOWNLOAD {request_id}] Serving original file: {file_path} as {filename}")
         
         # Download file from Supabase Storage
-        file_response = supabase.storage.from_("documents").download(file_path)
+        download_start = time.time()
+        try:
+            file_response = supabase.storage.from_("documents").download(file_path)
+        except Exception as storage_error:
+            logger.error(f"[DOWNLOAD {request_id}] Storage download error: {str(storage_error)}")
+            raise
+        download_time = time.time() - download_start
+        logger.info(f"[DOWNLOAD {request_id}] Storage download: {download_time:.2f}s")
         
         # Handle different response formats
         file_bytes = None
@@ -657,29 +738,38 @@ async def download_document(
             file_bytes = file_response
         
         if not file_bytes:
+            logger.error(f"[DOWNLOAD {request_id}] File bytes empty for: {file_path}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="File not found"
+                detail="File not found in storage"
             )
         
         # Determine content type
         content_type = document.get("mime_type", "application/octet-stream")
         
-        from fastapi.responses import Response
-        return Response(
-            content=file_bytes,
+        total_time = time.time() - start_time
+        logger.info(f"[DOWNLOAD {request_id}] Complete: {len(file_bytes)} bytes in {total_time:.2f}s, serving as {filename}")
+        
+        from fastapi.responses import StreamingResponse
+        import io
+        return StreamingResponse(
+            io.BytesIO(file_bytes),
             media_type=content_type,
             headers={
-                "Content-Disposition": f"attachment; filename=\"{filename}\""
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(file_bytes))
             }
         )
     
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        logger.error(f"[DOWNLOAD {request_id}] Error: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to download document file: {str(e)}"
+            detail=f"Failed to download document: {str(e)}"
         )
 
 @router.delete("/{document_id}")
@@ -741,105 +831,6 @@ async def delete_document(
             detail=f"Failed to delete document: {str(e)}"
         )
 
-@router.get("/{document_id}/download")
-async def download_redacted_document(
-    document_id: str,
-    current_user = Depends(get_current_user)
-):
-    """Download the redacted version of a document"""
-    
-    try:
-        supabase = get_supabase_client()
-        
-        # Get document to verify ownership and get redacted file path
-        doc_response = supabase.table("documents").select("*").eq("id", document_id).eq("user_id", current_user.id).execute()
-        
-        if not doc_response.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document not found"
-            )
-        
-        document = doc_response.data[0]
-        
-        if document["status"] != "processed":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Document has not been processed yet"
-            )
-        
-        # Get redacted file path from metadata
-        redacted_path = document.get("metadata", {}).get("redacted_storage_path")
-        
-        if not redacted_path:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Redacted file not found"
-            )
-        
-        # Ensure path doesn't have "documents/" prefix (for old documents that have it)
-        clean_redacted_path = redacted_path
-        while clean_redacted_path.startswith("documents/"):
-            clean_redacted_path = clean_redacted_path.replace("documents/", "", 1)
-        
-        # Download redacted file from storage with fallback paths
-        file_response = None
-        paths_to_try = [
-            clean_redacted_path,  # Try: 78e72506..._redacted.pdf
-            f"documents/{clean_redacted_path}",  # Try: documents/78e72506..._redacted.pdf (for nested old uploads)
-        ]
-        
-        for attempt_path in paths_to_try:
-            try:
-                file_response = supabase.storage.from_("documents").download(attempt_path)
-                
-                # Check if response is bytes directly
-                if isinstance(file_response, bytes):
-                    break
-                elif hasattr(file_response, 'data') and file_response.data:
-                    break
-                else:
-                    continue
-            except Exception:
-                continue
-        
-        # Handle both bytes response and object with .data attribute
-        file_bytes = None
-        if isinstance(file_response, bytes):
-            file_bytes = file_response
-        elif file_response and hasattr(file_response, 'data') and file_response.data:
-            file_bytes = file_response.data
-        
-        if not file_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Redacted file not found in storage"
-            )
-        
-        # Return file as download
-        import io
-        
-        # Generate filename for download
-        original_name = document["original_filename"]
-        name_parts = original_name.rsplit('.', 1)
-        if len(name_parts) == 2:
-            redacted_filename = f"{name_parts[0]}_redacted.{name_parts[1]}"
-        else:
-            redacted_filename = f"{original_name}_redacted"
-        
-        return StreamingResponse(
-            io.BytesIO(file_bytes),
-            media_type=document["mime_type"],
-            headers={"Content-Disposition": f"attachment; filename={redacted_filename}"}
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to download document: {str(e)}"
-        )
 
 @router.get("/{document_id}/download-redacted")
 async def download_redacted_document_alt(
