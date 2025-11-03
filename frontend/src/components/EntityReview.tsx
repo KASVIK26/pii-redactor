@@ -47,6 +47,7 @@ export default function EntityReview({ documentId, onClose }: EntityReviewProps)
 
   const fetchEntities = async () => {
     try {
+      console.log(`[FRONTEND] EntityReview.fetchEntities() - Fetching entities for document: ${documentId}`)
       const response = await fetch(`http://localhost:8000/api/entities/${documentId}`, {
         headers: {
           'Authorization': `Bearer test-token`,
@@ -59,10 +60,23 @@ export default function EntityReview({ documentId, onClose }: EntityReviewProps)
       }
 
       const data = await response.json()
-      setEntities(data.entities || [])
+      console.log(`[FRONTEND] EntityReview.fetchEntities() - API Response:`, data)
+      
+      // Get both detected and possible entities from API
+      const detectedEntities = data.entities || []
+      const possibleEntities = data.possible_entities || []
+      
+      console.log(`[FRONTEND] EntityReview.fetchEntities() - Detected: ${detectedEntities.length}, Possible: ${possibleEntities.length}`)
+      console.log(`[FRONTEND] EntityReview.fetchEntities() - Detected sample:`, detectedEntities.slice(0, 3).map((e: any) => ({ text: e.text?.substring(0, 20), type: e.label, conf: e.confidence })))
+      console.log(`[FRONTEND] EntityReview.fetchEntities() - Possible sample:`, possibleEntities.slice(0, 3).map((e: any) => ({ text: e.text?.substring(0, 20), type: e.label, conf: e.confidence })))
+      
+      // Combine them for display (detected entities first, then possible)
+      const allEntities = [...detectedEntities, ...possibleEntities]
+      console.log(`[FRONTEND] EntityReview.fetchEntities() - Total combined entities: ${allEntities.length}`)
+      setEntities(allEntities)
     } catch (err) {
       setError('Failed to load entities')
-      console.error('Error fetching entities:', err)
+      console.error('[FRONTEND] EntityReview.fetchEntities() - Error fetching entities:', err)
     } finally {
       setLoading(false)
     }

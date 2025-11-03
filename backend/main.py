@@ -2,12 +2,20 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import documents, auth, redaction, entities
 from app.core.config import settings
+from app.core.logging_config import setup_logging
+import logging
+
+# Initialize logging
+setup_logging()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="PII Redactor API",
     description="API for redacting personally identifiable information from documents",
     version="1.0.0"
 )
+
+logger.info("PII Redactor API starting up")
 
 # CORS middleware
 app.add_middleware(

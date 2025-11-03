@@ -27,10 +27,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        <script
-          src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
-          crossOrigin="anonymous"
-        />
+          <link rel="icon" href="/logo1.png" type="image/png" sizes="64x64" />
+          <script
+            src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
+            crossOrigin="anonymous"
+          />
         <script
           dangerouslySetInnerHTML={{
             __html: `
