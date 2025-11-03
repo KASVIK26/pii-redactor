@@ -26,9 +26,9 @@ export default function EditorPage() {
     const fetchEntities = async () => {
       try {
         setLoading(true)
-        console.log('[Editor] Fetching entities for:', documentId)
+        console.log('[Editor] Fetching document metadata for:', documentId)
         
-        const response = await fetch(`http://localhost:8000/api/documents/${documentId}/entities`, {
+        const response = await fetch(`http://localhost:8000/api/documents/${documentId}`, {
           headers: {
             'Authorization': `Bearer ${session.access_token}`,
             'Content-Type': 'application/json'
@@ -36,17 +36,23 @@ export default function EditorPage() {
         })
 
         if (response.ok) {
-          const data = await response.json()
-          console.log('[Editor] Entities fetched:', data.entities?.length || 0)
-          setEntities(data.entities || [])
+          const document = await response.json()
+          console.log('[Editor] Document fetched:', document)
+          
+          // Extract entities from metadata
+          const entitiesFromMetadata = document.metadata?.entities || []
+          console.log('[Editor] Entities from metadata:', entitiesFromMetadata.length)
+          console.log('[Editor] Entities sample:', entitiesFromMetadata.slice(0, 3))
+          
+          setEntities(entitiesFromMetadata)
         } else {
-          console.error('[Editor] Failed to fetch entities:', response.status)
+          console.error('[Editor] Failed to fetch document:', response.status)
         }
 
         // Set PDF URL
         setPdfUrl(`http://localhost:8000/api/documents/${documentId}/file`)
       } catch (err) {
-        console.error('[Editor] Error fetching entities:', err)
+        console.error('[Editor] Error fetching document:', err)
       } finally {
         setLoading(false)
       }

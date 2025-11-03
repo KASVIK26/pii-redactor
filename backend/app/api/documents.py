@@ -432,45 +432,12 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         
         logger.info(f"Upload completed for document {document_id}")
         
-        # Separate detected entities from possible/uncertain entities (confidence >= 50%)
-        # Detected = entities with higher confidence/well-classified
-        # Possible = remaining entities with confidence >= 50% that aren't in detected
-        logger.info(f"[DEBUG] Starting entity separation for {len(entities)} total entities")
-        detected_entities = []
-        possible_entities = []
-        
-        # Get all detected entity texts for comparison
-        detected_texts = set()
-        
-        # First pass: collect high-confidence, well-classified entities as "detected"
-        # These are entities that would typically go into our standard categories
-        standard_types = {'PERSON', 'DATE', 'ID', 'EMAIL', 'PHONE', 'ORGANIZATION', 'ADDRESS', 'URL'}
-        for entity in entities:
-            entity_type = entity.get('label', '').upper()
-            confidence = entity.get('confidence', 0)
-            entity_text = entity.get('text', '')
-            
-            # Detected = standard types with good confidence
-            if entity_type in standard_types and confidence > 0.75:
-                detected_entities.append(entity)
-                detected_texts.add(entity_text.lower())
-                logger.debug(f"[DEBUG] DETECTED: {entity_type:15} | Conf: {confidence:.2f} | Text: '{entity_text[:40]}'")
-            # Possible = confidence >= 50% but not in detected
-            elif confidence >= 0.50 and entity_text.lower() not in detected_texts:
-                possible_entities.append(entity)
-                logger.debug(f"[DEBUG] POSSIBLE: {entity_type:15} | Conf: {confidence:.2f} | Text: '{entity_text[:40]}'")
-        
-        logger.info(f"[Document {document_id}] Entity separation - Detected: {len(detected_entities)}, Possible: {len(possible_entities)} (from {len(entities)} total)")
-        logger.info(f"[DEBUG] Detected entities: {[{'type': e.get('label'), 'text': e.get('text', '')[:30], 'conf': e.get('confidence')} for e in detected_entities[:5]]}")
-        logger.info(f"[DEBUG] Possible entities: {[{'type': e.get('label'), 'text': e.get('text', '')[:30], 'conf': e.get('confidence')} for e in possible_entities[:5]]}")
-        
+        # Update DB with processed status and redacted file path
         merged_metadata = get_and_merge_metadata(supabase, document_id, {
             "stage": "completed",
-            "entities": make_json_serializable(detected_entities),
-            "possible_entities": make_json_serializable(possible_entities),
+            "entities": make_json_serializable(entities), 
             "redacted_storage_path": redacted_storage_path,
-            "entities_found": len(detected_entities),
-            "possible_entities_found": len(possible_entities),
+            "entities_found": len(entities),
             "text_length": len(full_text),
             "file_size_downloaded": len(file_bytes),
             "redacted_file_size": len(redacted_bytes)
@@ -539,57 +506,6 @@ async def get_document(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch document: {str(e)}"
-        )
-
-@router.get("/{document_id}/entities")
-async def get_document_entities(
-    document_id: str,
-    current_user = Depends(get_current_user)
-):
-    """Get detected entities for document - returns both detected and possible entities"""
-    
-    try:
-        print(f"\n[BACKEND API] /entities endpoint called for document_id: {document_id}")
-        supabase = get_supabase_client()
-        response = supabase.table("documents").select("*").eq("id", document_id).eq("user_id", current_user.id).execute()
-        
-        if not response.data:
-            print(f"[BACKEND API] Document not found: {document_id}")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document not found"
-            )
-        
-        document = response.data[0]
-        metadata = document.get("metadata", {})
-        
-        # Get detected entities (main list)
-        detected_entities = metadata.get("entities", [])
-        
-        # Get possible entities (uncertainty list - confidence >= 50%, not in detected)
-        possible_entities = metadata.get("possible_entities", [])
-        
-        print(f"[BACKEND API] Document {document_id} - Detected: {len(detected_entities)}, Possible: {len(possible_entities)}")
-        print(f"[BACKEND API] Detected entities sample: {[{'text': e.get('text', '')[:20], 'type': e.get('label'), 'conf': e.get('confidence')} for e in detected_entities[:3]]}")
-        print(f"[BACKEND API] Possible entities sample: {[{'text': e.get('text', '')[:20], 'type': e.get('label'), 'conf': e.get('confidence')} for e in possible_entities[:3]]}")
-        
-        response_data = {
-            "entities": detected_entities,
-            "possible_entities": possible_entities,
-            "totalPages": metadata.get("total_pages", 1),
-            "documentId": document_id
-        }
-        
-        print(f"[BACKEND API] Sending response: {{'entities': {len(detected_entities)}, 'possible_entities': {len(possible_entities)}}}")
-        return response_data
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[BACKEND API] ERROR in /entities endpoint: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch document entities: {str(e)}"
         )
 
 @router.get("/{document_id}/file")

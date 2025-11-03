@@ -352,7 +352,8 @@ export function RecentDocuments() {
       {/* Entity Review Modal */}
       {entityReviewDocId && (
         <EntityReview 
-          documentId={entityReviewDocId} 
+          documentId={entityReviewDocId}
+          accessToken={session?.access_token || ''}
           onClose={() => setEntityReviewDocId(null)} 
         />
       )}

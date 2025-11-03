@@ -48,6 +48,8 @@ export const LiveRedactionEditor: React.FC<LiveRedactionEditorProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [redactionStats, setRedactionStats] = useState<{ totalRedacted: number; processingTimeMs: number } | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const pdfContainerRef = useRef<HTMLDivElement>(null);
@@ -187,13 +189,14 @@ export const LiveRedactionEditor: React.FC<LiveRedactionEditorProps> = ({
         } catch (downloadErr) {
           const msg = downloadErr instanceof Error ? downloadErr.message : 'Failed to download redacted PDF';
           console.error('[LiveRedactionEditor] Download error:', msg);
-          alert(`⚠️ Redaction applied successfully!\n\nHowever, download failed: ${msg}`);
+          console.warn('Download failed but redaction was applied:', msg);
         }
-        
-        // Show success message
-        setError(null);
-        alert(`✅ Redaction applied successfully!\n\nRedacted PDF downloaded.\n\nStats:\n- Entities redacted: ${result.stats?.totalRedacted || 0}\n- Processing time: ${result.stats?.processingTimeMs || 0}ms`);
       }
+      
+      // Show success modal
+      setError(null);
+      setRedactionStats(result.stats || { totalRedacted: 0, processingTimeMs: 0 });
+      setShowSuccessModal(true);
       
       onRedactionComplete?.(result);
     } catch (err) {
@@ -444,6 +447,37 @@ export const LiveRedactionEditor: React.FC<LiveRedactionEditorProps> = ({
                 Retry
               </Button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Success Modal */}
+      {showSuccessModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-slate-900 border border-green-700 rounded-lg p-8 max-w-md w-full mx-4">
+            <div className="flex items-center gap-3 mb-4">
+              <FileCheck className="h-6 w-6 text-green-500" />
+              <h3 className="text-lg font-semibold text-white">Success!</h3>
+            </div>
+            <div className="space-y-3 text-gray-300 mb-6">
+              <p className="font-medium">✅ Redaction applied successfully!</p>
+              <p>Redacted PDF has been downloaded.</p>
+              {redactionStats && (
+                <div className="bg-slate-800/50 rounded p-3 space-y-1 text-sm">
+                  <p>📊 <span className="text-gray-400">Entities redacted:</span> <span className="text-green-400 font-semibold">{redactionStats.totalRedacted}</span></p>
+                  <p>⏱️ <span className="text-gray-400">Processing time:</span> <span className="text-green-400 font-semibold">{redactionStats.processingTimeMs}ms</span></p>
+                </div>
+              )}
+            </div>
+            <Button
+              onClick={() => {
+                setShowSuccessModal(false);
+                onCancel?.();
+              }}
+              className="w-full bg-green-600 hover:bg-green-700 text-white"
+            >
+              OK
+            </Button>
           </div>
         </div>
       )}
