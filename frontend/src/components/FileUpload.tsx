@@ -114,7 +114,9 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'application/pdf': ['.pdf']
+      'application/pdf': ['.pdf'],
+      'image/png': ['.png'],
+      'image/jpeg': ['.jpg', '.jpeg']
     },
     maxSize: 10 * 1024 * 1024, // 10MB
     maxFiles: 5

@@ -169,6 +169,7 @@ class PIIDetectionService:
             'paid on:', 'paid date:', 'payment date:', 'from:', 'to:',
             'balance', 'due', 'semester', 'academic', 'session', 'year',
             '2025-26', '2024-25', '2023-24'  # Academic years
+            # NOTE: Removed 'ssn', 'phone', 'email' from skip list as these are legitimate PII
         }
         
         # Patterns that indicate labels/headers (text followed by colon/equals)
@@ -210,6 +211,14 @@ class PIIDetectionService:
                 filtered_count += 1
                 continue
             
+            # Filter common PII field labels/acronyms (SSN, DOB, etc.) that aren't actual values
+            common_pii_labels = {'ssn', 'dob', 'pan', 'aadhar', 'phone', 'email', 'name', 'address', 
+                                 'city', 'state', 'pin', 'zip', 'account', 'card', 'id', 'no', 'date'}
+            if entity_text_lower in common_pii_labels and entity['label'] not in ['SSN', 'PHONE', 'EMAIL', 'DATE']:
+                logger.debug(f"[Filter] Skipped PII field label: '{entity['text']}' (recognized as field name)")
+                filtered_count += 1
+                continue
+            
             # Filter out pure numeric amounts (0-9999)
             if entity['label'] == 'IDENTIFIER' and entity_text.replace('.', '').isdigit():
                 amount = float(entity_text) if '.' in entity_text else int(entity_text)
@@ -240,7 +249,7 @@ class PIIDetectionService:
     def _detect_with_regex(self, text: str) -> List[Dict]:
         """Detect PII using regex patterns"""
         entities = []
-        regex_stats = {'EMAIL': 0, 'PHONE_NUMBER': 0, 'SSN': 0, 'CREDIT_CARD': 0, 
+        regex_stats = {'EMAIL': 0, 'PHONE': 0, 'SSN': 0, 'CREDIT_CARD': 0, 
                        'INDIAN_DATE': 0, 'STUDENT_ID': 0, 'TRANSACTION_ID': 0}
         
         # Email pattern
@@ -260,24 +269,24 @@ class PIIDetectionService:
         
         # Phone number patterns
         phone_patterns = [
-            (r'\b\d{3}-\d{3}-\d{4}\b', '123-456-7890'),
-            (r'\b\(\d{3}\)\s*\d{3}-\d{4}\b', '(123) 456-7890'),
-            (r'\b\d{3}\.\d{3}\.\d{4}\b', '123.456.7890'),
-            (r'\b\+1\s*\d{3}\s*\d{3}\s*\d{4}\b', '+1 123 456 7890'),
+            (r'\d{3}-\d{3}-\d{4}', '123-456-7890'),
+            (r'\(\d{3}\)\s*\d{3}-\d{4}', '(123) 456-7890'),
+            (r'\d{3}\.\d{3}\.\d{4}', '123.456.7890'),
+            (r'\+1\s*\d{3}\s*\d{3}\s*\d{4}', '+1 123 456 7890'),
         ]
         
         for pattern, pattern_desc in phone_patterns:
             for match in re.finditer(pattern, text):
                 entity_obj = {
                     'text': match.group(),
-                    'label': 'PHONE_NUMBER',
+                    'label': 'PHONE',
                     'confidence': 0.9,
                     'start_pos': match.start(),
                     'end_pos': match.end(),
                     'method': 'regex'
                 }
                 entities.append(entity_obj)
-                regex_stats['PHONE_NUMBER'] += 1
+                regex_stats['PHONE'] += 1
                 logger.debug(f"[Regex] PHONE pattern ({pattern_desc}) matched: '{match.group()}' at position {match.start()}")
         
         # SSN pattern
@@ -522,14 +531,25 @@ class PIIDetectionService:
                         overlapped = True
                         break
                 elif entity['start_pos'] <= existing['end_pos'] + 2 and entity['start_pos'] >= existing['start_pos'] - 2:
-                    # Overlapping positions
-                    if entity['confidence'] > existing['confidence']:
+                    # Overlapping positions - prioritize regex methods and higher confidence
+                    should_replace = False
+                    if entity['method'] == 'regex' and existing['method'] != 'regex':
+                        # Prefer regex detection over other methods
+                        should_replace = True
+                        logger.debug(f"[Merge] Prioritizing regex detection over {existing['method']}")
+                    elif entity['confidence'] > existing['confidence']:
+                        should_replace = True
                         logger.debug(f"[Merge] Overlapping entities, keeping higher confidence:")
-                        logger.debug(f"  Removing: {existing['label']} '{existing['text']}'")
-                        merged = [e for e in merged if e != existing]
-                        logger.debug(f"  Adding: {entity['label']} '{entity['text']}'")
                     else:
-                        logger.debug(f"[Merge] Skipping overlapping lower confidence: {entity['label']} '{entity['text']}'")
+                        logger.debug(f"[Merge] Skipping overlapping lower/equal confidence: {entity['label']} '{entity['text']}'")
+                    
+                    if should_replace:
+                        logger.debug(f"  Removing: {existing['label']} '{existing['text']}' ({existing['method']})")
+                        merged = [e for e in merged if e != existing]
+                        logger.debug(f"  Adding: {entity['label']} '{entity['text']}' ({entity['method']})")
+                        merged.append(entity)  # ADD THE ENTITY
+                        seen_text[f"{entity['text'].lower().strip()}:{entity['label']}"] = entity
+                    
                     overlapped = True
                     merge_count += 1
                     break

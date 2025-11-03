@@ -260,13 +260,14 @@ export const useDocuments = () => {
       fetchDocumentsRef.current(true)
     }
 
-    // Then poll every 1.5 seconds for faster updates during processing
+    // Poll every 2.5 seconds (increased from 1.5s to reduce server load)
+    // This gives more time for backend processing
     pollIntervalRef.current = setInterval(() => {
       console.log('[useDocuments] Poll interval triggered')
       if (fetchDocumentsRef.current) {
         fetchDocumentsRef.current(true)
       }
-    }, 1500)
+    }, 2500)
 
     return () => {
       console.log('[useDocuments] Cleaning up polling')

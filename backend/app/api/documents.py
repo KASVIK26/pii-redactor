@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from supabase import create_client, Client
 from app.core.config import settings
+import threading
 
 router = APIRouter()
 security = HTTPBearer()
@@ -22,19 +23,14 @@ def get_supabase_auth_client() -> Client:
 # Auth dependency
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Verify JWT token and get current user"""
-    print(f"[Auth] get_current_user called with credentials: {credentials.credentials[:50] if credentials else 'None'}...")
     try:
         # Use anon client to verify token
         supabase_auth = get_supabase_auth_client()
-        print(f"[Auth] Verifying token with Supabase...")
         user_response = supabase_auth.auth.get_user(credentials.credentials)
-        print(f"[Auth] User response: {user_response}")
         
         if user_response.user:
-            print(f"[Auth] User verified: {user_response.user.id}")
             return user_response.user
         else:
-            print(f"[Auth] ERROR: No user in response")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid authentication token"
@@ -42,7 +38,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[Auth] ERROR: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed"
@@ -115,8 +110,8 @@ def allowed_file(filename: str) -> bool:
 
 @router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None,
     current_user = Depends(get_current_user)
 ):
     """Upload a document for PII redaction"""
@@ -166,8 +161,13 @@ async def upload_document(
                 detail=f"Failed to save document metadata: {error_msg}"
             )
         # Queue background processing for PII detection/redaction
-        if background_tasks is not None:
-            background_tasks.add_task(process_document_task, document_id, storage_path, file.content_type)
+        # Use threading instead of BackgroundTasks for more reliable execution
+        thread = threading.Thread(
+            target=process_document_task,
+            args=(document_id, storage_path, file.content_type),
+            daemon=False
+        )
+        thread.start()
         return DocumentUploadResponse(
             document_id=document_id,
             filename=file.filename,
@@ -190,6 +190,16 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
     from app.services.pii_detection_service import PIIDetectionService
     from app.services.redaction_service import RedactionService
     import logging
+    import time
+    
+    logger = logging.getLogger("process_document_task")
+    
+    # Log that thread actually started (with timestamp for debugging)
+    start_time = time.time()
+    logger.info(f"[THREAD START] Processing document {document_id} at {start_time}")
+    logger.info(f"[THREAD] Storage path: {storage_path}, MIME type: {mime_type}")
+    
+    logger.info(f"[TASK START] Processing document {document_id}")
     
     def make_json_serializable(obj):
         """Convert numpy types to Python native types for JSON serialization"""
@@ -223,21 +233,44 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         return new_metadata
     
     supabase = get_supabase_client()
-    logger = logging.getLogger("process_document_task")
-    supabase.table("documents").update({"status": "processing"}).eq("id", document_id).execute()
+    
     try:
+        logger.info(f"[TASK] Setting document status to 'processing' for {document_id}")
+        supabase.table("documents").update({"status": "processing"}).eq("id", document_id).execute()
+        
         # Download file from Supabase Storage
-        logger.info(f"Downloading file from storage: {storage_path}")
-        file_response = supabase.storage.from_("documents").download(storage_path)
+        logger.info(f"[TASK] Downloading file from storage: {storage_path}")
+        
+        # Update metadata to show we're downloading
+        merged_metadata = get_and_merge_metadata(supabase, document_id, {
+            "stage": "downloading",
+            "started_at": str(np.datetime64('now'))
+        })
+        supabase.table("documents").update({
+            "metadata": merged_metadata
+        }).eq("id", document_id).execute()
+        
+        try:
+            file_response = supabase.storage.from_("documents").download(storage_path)
+            logger.info(f"[TASK] Download response received: {type(file_response)}")
+        except Exception as e:
+            logger.error(f"[TASK] File download failed: {str(e)}", exc_info=True)
+            supabase.table("documents").update({
+                "status": "failed",
+                "metadata": {"error": f"File download failed: {str(e)}", "stage": "download_error"}
+            }).eq("id", document_id).execute()
+            return
         
         # Handle different response formats
         file_bytes = None
         if hasattr(file_response, 'data') and file_response.data:
             file_bytes = file_response.data
+            logger.info(f"[TASK] Got file from response.data: {len(file_bytes)} bytes")
         elif isinstance(file_response, bytes):
             file_bytes = file_response
+            logger.info(f"[TASK] Got file as bytes: {len(file_bytes)} bytes")
         else:
-            logger.error(f"Unexpected response format for document {document_id}: {type(file_response)}")
+            logger.error(f"[TASK] Unexpected response format for document {document_id}: {type(file_response)}")
             supabase.table("documents").update({
                 "status": "failed",
                 "metadata": {"error": "Failed to download file from storage", "stage": "download"}
@@ -245,14 +278,14 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             return
             
         if not file_bytes:
-            logger.error(f"No file data received for document {document_id}")
+            logger.error(f"[TASK] No file data received for document {document_id}")
             supabase.table("documents").update({
                 "status": "failed", 
                 "metadata": {"error": "No file data received", "stage": "download"}
             }).eq("id", document_id).execute()
             return
             
-        logger.info(f"Successfully downloaded {len(file_bytes)} bytes for document {document_id}")
+        logger.info(f"[TASK] Successfully downloaded {len(file_bytes)} bytes for document {document_id}")
         
         # Update status to indicate download completed
         merged_metadata = get_and_merge_metadata(supabase, document_id, {
@@ -263,12 +296,15 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             "status": "processing",
             "metadata": merged_metadata
         }).eq("id", document_id).execute()
+        
         # Save to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(storage_path)[1]) as tmp_file:
             tmp_file.write(file_bytes)
             tmp_file_path = tmp_file.name
+        logger.info(f"[TASK] Created temp file: {tmp_file_path}")
+        
         # OCR
-        logger.info(f"Starting OCR for document {document_id}")
+        logger.info(f"[TASK] Starting OCR for document {document_id}, mime_type: {mime_type}")
         merged_metadata = get_and_merge_metadata(supabase, document_id, {
             "stage": "ocr_starting",
             "file_size_downloaded": len(file_bytes)
@@ -279,16 +315,19 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         
         try:
             ocr = OCRService()
+            logger.info(f"[TASK] OCR service initialized")
             if mime_type == "application/pdf":
+                logger.info(f"[TASK] Extracting text from PDF")
                 ocr_result = ocr.extract_text_from_pdf(tmp_file_path)
                 full_text = " ".join([p['text'] for p in ocr_result['pages']])
                 blocks = [b for p in ocr_result['pages'] for b in p['blocks']]
             else:
+                logger.info(f"[TASK] Extracting text from image")
                 ocr_result = ocr.extract_text_from_image(tmp_file_path)
                 full_text = ocr_result['full_text']
                 blocks = ocr_result['text_blocks']
                 
-            logger.info(f"OCR completed for document {document_id}, extracted {len(full_text)} characters")
+            logger.info(f"[TASK] OCR completed for document {document_id}, extracted {len(full_text)} characters")
             merged_metadata = get_and_merge_metadata(supabase, document_id, {
                 "stage": "ocr_complete",
                 "text_length": len(full_text),
@@ -299,7 +338,7 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             }).eq("id", document_id).execute()
             
         except Exception as e:
-            logger.error(f"OCR failed for document {document_id}: {str(e)}")
+            logger.error(f"[TASK] OCR failed for document {document_id}: {str(e)}", exc_info=True)
             supabase.table("documents").update({
                 "status": "failed",
                 "metadata": {"stage": "ocr_failed", "error": str(e), "file_size_downloaded": len(file_bytes)}
@@ -308,7 +347,7 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             blocks = []
         
         # PII Detection
-        logger.info(f"Starting PII detection for document {document_id}")
+        logger.info(f"[TASK] Starting PII detection for document {document_id}")
         merged_metadata = get_and_merge_metadata(supabase, document_id, {
             "stage": "pii_detection_starting",
             "text_length": len(full_text),
@@ -320,6 +359,7 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         
         try:
             pii = PIIDetectionService()
+            logger.info(f"[TASK] PII detection service initialized")
             entities = pii.detect_pii(full_text)
             
             # Detailed entity breakdown logging
@@ -334,17 +374,9 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
                     entity_methods[method] = {}
                 entity_methods[method][label] = entity_methods[method].get(label, 0) + 1
             
-            logger.info(f"[Document {document_id}] PII detection completed: {len(entities)} total entities")
-            logger.info(f"[Document {document_id}] Entity breakdown by type: {entity_breakdown}")
-            logger.info(f"[Document {document_id}] Entity breakdown by detection method: {entity_methods}")
-            
-            # Log top detected entities (for analysis purposes - limit to first 50)
-            sorted_entities = sorted(entities, key=lambda x: x.get('confidence', 0), reverse=True)[:50]
-            for idx, entity in enumerate(sorted_entities, 1):
-                logger.debug(f"[Document {document_id}] Entity {idx}: {entity.get('label', 'UNKNOWN'):15} | "
-                            f"Method: {entity.get('method', 'unknown'):12} | "
-                            f"Confidence: {entity.get('confidence', 0):.2f} | "
-                            f"Text: '{entity.get('text', '')[:60]}'")
+            logger.info(f"[TASK] PII detection completed for document {document_id}: {len(entities)} total entities")
+            logger.info(f"[TASK] Entity breakdown by type: {entity_breakdown}")
+            logger.info(f"[TASK] Entity breakdown by detection method: {entity_methods}")
             
             merged_metadata = get_and_merge_metadata(supabase, document_id, {
                 "stage": "pii_detection_complete",
@@ -357,7 +389,7 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             }).eq("id", document_id).execute()
             
         except Exception as e:
-            logger.error(f"PII detection failed for document {document_id}: {str(e)}")
+            logger.error(f"[TASK] PII detection failed for document {document_id}: {str(e)}", exc_info=True)
             supabase.table("documents").update({
                 "status": "failed",
                 "metadata": {"stage": "pii_detection_failed", "error": str(e), "text_length": len(full_text), "file_size_downloaded": len(file_bytes)}
@@ -365,7 +397,7 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             entities = []
         
         # Redaction
-        logger.info(f"Starting redaction for document {document_id}")
+        logger.info(f"[TASK] Starting redaction for document {document_id}")
         merged_metadata = get_and_merge_metadata(supabase, document_id, {
             "stage": "redaction_starting",
             "entities_found": len(entities),
@@ -378,9 +410,11 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         
         try:
             redactor = RedactionService()
+            logger.info(f"[TASK] Redaction service initialized")
             redacted_path = tmp_file_path.replace('.', '_redacted.', 1)
+            logger.info(f"[TASK] Redacting to: {redacted_path}")
             redaction_result = redactor.redact_document(tmp_file_path, redacted_path, entities)
-            logger.info(f"Redaction completed for document {document_id}")
+            logger.info(f"[TASK] Redaction completed for document {document_id}")
             merged_metadata = get_and_merge_metadata(supabase, document_id, {
                 "stage": "redaction_complete",
                 "entities_found": len(entities),
@@ -392,7 +426,7 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             }).eq("id", document_id).execute()
             
         except Exception as e:
-            logger.error(f"Redaction failed for document {document_id}: {str(e)}")
+            logger.error(f"[TASK] Redaction failed for document {document_id}: {str(e)}", exc_info=True)
             supabase.table("documents").update({
                 "status": "failed",
                 "metadata": {"stage": "redaction_failed", "error": str(e), "entities_found": len(entities), "text_length": len(full_text), "file_size_downloaded": len(file_bytes)}
@@ -401,8 +435,9 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             import shutil
             redacted_path = tmp_file_path.replace('.', '_redacted.', 1)
             shutil.copy2(tmp_file_path, redacted_path)
+        
         # Upload redacted file
-        logger.info(f"Uploading redacted file for document {document_id}")
+        logger.info(f"[TASK] Uploading redacted file for document {document_id}")
         merged_metadata = get_and_merge_metadata(supabase, document_id, {
             "stage": "upload_starting",
             "entities_found": len(entities),
@@ -424,13 +459,14 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
         
         redacted_storage_path = clean_storage_path.replace('.', '_redacted.', 1)
         
+        logger.info(f"[TASK] Uploading to storage: {redacted_storage_path}")
         upload_result = supabase.storage.from_("documents").upload(
             redacted_storage_path,
             redacted_bytes,
             file_options={"content-type": mime_type}
         )
         
-        logger.info(f"Upload completed for document {document_id}")
+        logger.info(f"[TASK] Upload completed for document {document_id}")
         
         # Update DB with processed status and redacted file path
         merged_metadata = get_and_merge_metadata(supabase, document_id, {
@@ -446,27 +482,37 @@ def process_document_task(document_id: str, storage_path: str, mime_type: str):
             "status": "processed",
             "metadata": merged_metadata
         }).eq("id", document_id).execute()
-        logger.info(f"[REDACTION UPLOAD] DB updated with redacted_storage_path")
+        logger.info(f"[TASK] COMPLETED - DB updated with redacted_storage_path for {document_id}")
+        logger.info(f"[TASK END] Processing completed successfully for document {document_id}")
         
         # Store entities in simplified redaction session (optional)
         try:
             # Note: We'll skip this for now since we don't have proper user context in background task
             # The entities are already stored in documents.metadata.entities which is sufficient
             # Users can create redaction sessions from the frontend when needed
-            logger.info(f"Entities stored in document metadata for {document_id}")
+            logger.info(f"[TASK] Entities stored in document metadata for {document_id}")
         except Exception as e:
-            logger.warning(f"Note: {str(e)}")
+            logger.warning(f"[TASK] Note: {str(e)}")
             # Don't fail the whole process
         
         # Cleanup temp files
-        os.remove(tmp_file_path)
-        os.remove(redacted_path)
+        try:
+            os.remove(tmp_file_path)
+            os.remove(redacted_path)
+            logger.info(f"[TASK] Cleaned up temp files")
+        except Exception as e:
+            logger.warning(f"[TASK] Could not clean up temp files: {str(e)}")
+            
     except Exception as e:
-        logger.error(f"Processing failed for document {document_id}: {str(e)}")
-        supabase.table("documents").update({
-            "status": "failed",
-            "metadata": {"stage": "general_error", "error": str(e)}
-        }).eq("id", document_id).execute()
+        logger.error(f"[TASK] FAILED - General error for document {document_id}: {str(e)}", exc_info=True)
+        try:
+            supabase.table("documents").update({
+                "status": "failed",
+                "metadata": {"stage": "general_error", "error": str(e)}
+            }).eq("id", document_id).execute()
+        except Exception as db_err:
+            logger.error(f"[TASK] Could not update database with error status: {str(db_err)}")
+
 
 @router.get("/", response_model=List[DocumentMetadata])
 async def list_documents(current_user = Depends(get_current_user)):
@@ -569,6 +615,71 @@ async def get_document_file(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to serve document file: {str(e)}"
+        )
+
+@router.get("/{document_id}/download")
+async def download_document(
+    document_id: str,
+    redacted: bool = False
+):
+    """Download the document file (original or redacted) - same as /file but for downloads"""
+    
+    try:
+        supabase = get_supabase_client()
+        
+        # Get document metadata
+        doc_response = supabase.table("documents").select("*").eq("id", document_id).execute()
+        
+        if not doc_response.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        document = doc_response.data[0]
+        
+        # Determine which file to serve
+        if redacted and document.get("metadata", {}).get("redacted_storage_path"):
+            file_path = document["metadata"]["redacted_storage_path"]
+            filename = document['original_filename'].rsplit('.', 1)[0] + '_redacted.' + document['original_filename'].rsplit('.', 1)[1] if '.' in document['original_filename'] else document['original_filename'] + '_redacted'
+        else:
+            file_path = document["storage_path"]
+            filename = document['original_filename']
+        
+        # Download file from Supabase Storage
+        file_response = supabase.storage.from_("documents").download(file_path)
+        
+        # Handle different response formats
+        file_bytes = None
+        if hasattr(file_response, 'data') and file_response.data:
+            file_bytes = file_response.data
+        elif isinstance(file_response, bytes):
+            file_bytes = file_response
+        
+        if not file_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found"
+            )
+        
+        # Determine content type
+        content_type = document.get("mime_type", "application/octet-stream")
+        
+        from fastapi.responses import Response
+        return Response(
+            content=file_bytes,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f"attachment; filename=\"{filename}\""
+            }
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to download document file: {str(e)}"
         )
 
 @router.delete("/{document_id}")
@@ -870,9 +981,9 @@ async def download_redacted_document_alt(
 
 @router.post("/{document_id}/apply-redaction", response_model=ApplyRedactionResponse)
 async def apply_redaction(
+    background_tasks: BackgroundTasks,
     document_id: str,
     request: ApplyRedactionRequest,
-    background_tasks: BackgroundTasks = None,
     current_user = Depends(get_current_user)
 ):
     """

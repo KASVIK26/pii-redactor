@@ -66,6 +66,10 @@ class RedactionService:
             else:
                 raise ValueError(f"Unsupported file format: {file_ext}")
                 
+        except ValueError as e:
+            # Unsupported format - re-raise
+            logger.error(f"[Redaction] Unsupported file format: {str(e)}")
+            raise
         except Exception as e:
             logger.error(f"[Redaction] Redaction failed for {input_path}: {str(e)}")
             # If redaction fails completely, just copy the original file

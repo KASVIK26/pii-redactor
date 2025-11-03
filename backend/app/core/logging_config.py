@@ -7,12 +7,31 @@ from pathlib import Path
 import os
 from datetime import datetime
 
+class QuietHTTPXFilter(logging.Filter):
+    """Suppress verbose httpx logs"""
+    def filter(self, record):
+        # Only show httpx errors, not all INFO logs
+        if record.levelno < logging.WARNING:
+            return False
+        return True
+
+class QuietAuthFilter(logging.Filter):
+    """Suppress verbose auth logs, only show errors"""
+    def filter(self, record):
+        # Only show auth errors and important messages
+        if "[Auth] User response:" in record.getMessage():
+            return False
+        if "[Auth] Verifying token" in record.getMessage():
+            return False
+        return True
+
 def setup_logging(log_level=logging.INFO):
     """
     Configure logging for the application with:
     - Console handler (INFO level and above)
     - File handler with daily rotation (DEBUG level and above)
     - Specific loggers for entity detection tracking
+    - Filters to suppress verbose httpx and auth logs
     """
     
     # Create logs directory if it doesn't exist
@@ -39,6 +58,15 @@ def setup_logging(log_level=logging.INFO):
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
+    
+    # Suppress httpx verbose logs
+    httpx_logger = logging.getLogger("httpx")
+    httpx_logger.setLevel(logging.WARNING)
+    httpx_logger.addFilter(QuietHTTPXFilter())
+    
+    # Suppress urllib3 verbose logs
+    urllib3_logger = logging.getLogger("urllib3")
+    urllib3_logger.setLevel(logging.WARNING)
     
     # File handler with rotation (DEBUG and above)
     log_file = logs_dir / f"pii_redactor_{datetime.now().strftime('%Y%m%d')}.log"
